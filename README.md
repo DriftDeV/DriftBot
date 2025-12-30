@@ -1,7 +1,7 @@
 # DriftBot — Guida semplice e veloce
 
 DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale e soundboard.  
-Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo — anche un bambino di 5 anni dovrebbe riuscirci.
+Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo.
 
 ---
 
@@ -16,13 +16,12 @@ cd DriftBot
 ```bash
 python3.10 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+make install
 ```
 - Windows (PowerShell):
 ```powershell
-python -m venv venv
-. .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\setup-windows.ps1
 ```
 3. Metti il token di Discord in un file `.env` nella cartella principale:
 ```env
@@ -60,8 +59,7 @@ brew install python@3.10 ffmpeg git
   1. Installa Python 3.10 dal sito ufficiale.
   2. Apri PowerShell come amministratore e, se vuoi lo script di setup:
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\setup-windows.ps1
+
 ```
   3. Installa ffmpeg (es. con Chocolatey: `choco install ffmpeg`) o scarica binari.
 
@@ -167,10 +165,3 @@ Regole pratiche:
 - Eseguire bot: `make run` o `python src/main.py`
 
 ---
-
-Se vuoi, posso:
-- Preparare un file README pronto da committare,
-- O creare esempi di index.json e alias.json già riempiti,
-- O tradurre questo README in inglese.
-
-Grazie — dimmi cosa preferisci e lo preparo subito!
