@@ -1,346 +1,176 @@
-# DriftcoordBot 🎤
+# DriftBot — Guida semplice e veloce
 
-Un bot Discord intelligente per la clonazione vocale e il text-to-speech avanzato.
-
-## 📖 Descrizione
-
-DriftcoordBot è un bot Discord progettato per offrire funzionalità avanzate di Text-to-Speech (TTS) e clonazione vocale. Supporta il riconoscimento vocale, la generazione di parlato sintetico e l'integrazione con vari modelli di AI per la creazione di cover vocali. Il bot è costruito con architettura modulare basata su Cogs, rendendo facile l'estensione e la manutenzione.
-
-## ✨ Funzionalità Principali
-
-### Funzionalità TTS
-- 🎙️ Clonazione vocale avanzata tramite TTS
-- 🌍 Supporto per più lingue (italiano, inglese, etc.)
-- 🎵 Generazione di cover musicali con AI (AI Cover)
-- 🔊 Soundboard personalizzabili per server Discord
-- 👤 Creazione e gestione di speaker personalizzati
-
-### Gestione del Bot
-- 🤖 Slash Commands moderni
-- 🎯 Architettura modulare basata su Cogs
-- 📦 Dipendenze fissate per ambienti riproducibili
-- 🚀 Setup automatico con Makefile e PowerShell
-- 🔧 Comandi di amministrazione avanzati
-
-### Integrazioni
-- 🗣️ Integrazione con Coqui TTS
-- 🎼 Support per RVC (Retrieval-based Voice Conversion)
-
-## 📋 Requisiti
-
-- Python 3.10
-- Librerie specificate in `requirements.txt`
-- Per macOS: Homebrew (opzionale)
-
-## 🚀 Quick Start
-
-### Windows
-
-**Metodo 1: Setup automatico (consigliato)**
-
-```powershell
-# Eseguire PowerShell come Amministratore
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\setup-windows.ps1
-```
-
-Con dipendenze di sviluppo:
-
-```powershell
-.\setup-windows.ps1 -Dev
-```
-
-**Metodo 2: Setup manuale**
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python src/main.py
-```
-
-### macOS
-
-```bash
-# Installare Homebrew (se non present)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Installare Python
-brew install python@3.10
-
-# Setup del progetto
-git clone https://github.com/DriftDeV/Python-DriftCoordBot.git
-cd Python-DriftCoordBot
-
-make install-dev  # Per sviluppo
-make install      # Per hosting
-make run          # Eseguire il bot
-```
-
-### Linux (Debian/Ubuntu)
-
-```bash
-# Installare Python
-sudo apt update
-sudo apt install python3.10 python3.10-venv
-
-# Setup del progetto
-git clone https://github.com/DriftDeV/Python-DriftCoordBot.git
-cd Python-DriftCoordBot
-make install-dev  # Per sviluppo
-make install      # Per hosting
-make run          # Eseguire il bot
-```
-
-### Linux (Fedora)
-
-```bash
-# Installare Python
-sudo dnf install python3.10 python3.10-devel
-
-# Setup del progetto
-git clone https://github.com/DriftDeV/Python-DriftCoordBot.git
-cd Python-DriftCoordBot
-make install-dev  # Per sviluppo
-make install      # Per hosting
-make run          # Eseguire il bot
-```
-
-### Linux (Arch)
-
-```bash
-# Installare Python
-sudo pacman -S python
-
-# Setup del progetto
-git clone https://github.com/DriftDeV/Python-DriftCoordBot.git
-cd Python-DriftCoordBot
-make install-dev  # Per sviluppo
-make install      # Per hosting
-make run          # Eseguire il bot
-```
-
-## 🛠️ Development Workflow
-
-### Comandi di Qualità del Codice
-
-```bash
-# Formattare il codice con Black e isort
-make format
-
-# Controllare il codice con linting
-make lint
-
-# Type checking con mypy
-make type-check
-
-# Pre-commit checks (format + lint + type-check)
-make pre-commit
-```
-
-### Testing
-
-```bash
-# Eseguire i test unitari
-make test
-
-# Eseguire i test con report di copertura
-make test
-```
-
-### Comandi Make Disponibili
-
-```bash
-make help              # Mostra tutti i comandi disponibili
-make venv              # Crea l'ambiente virtuale
-make install           # Installa dipendenze di produzione
-make install-dev       # Installa con dipendenze di sviluppo
-make clean             # Rimuove venv e cache
-make run               # Esegui il bot
-make lint              # Controlli di linting
-make format            # Formatta il codice con Black
-make type-check        # Type checking con mypy
-make test              # Esegui i test unitari
-make pre-commit        # Format + lint + type-check
-make update            # Aggiorna tutte le dipendenze
-```
-
-## 📁 Struttura del Progetto
-
-```
-Python-DriftCoordBot/
-├── fedora-deps.sh                          # Script di dipendenze per Fedora
-├── Makefile                                # Automazione della build
-├── pyproject.toml                          # Configurazione del progetto
-├── README.md                               # Questo file
-├── requirements.txt                        # Dipendenze del progetto
-├── setup-windows.ps1                       # Script di setup per Windows
-├── SETUP.md                                # Guida di setup dettagliata
-│
-├── src/                                    # Codice sorgente principale
-│   ├── main.py                            # Entry point del bot
-│   ├── test.py                            # Test di base
-│   └── cogs/                              # Moduli estensibili del bot
-│       ├── __init__.py                    # Inizializzazione dei Cogs
-│       ├── ai_cover_cog.py                # Cog per AI Cover musicali
-│       ├── Create_speaker.py              # Cog per creazione speaker
-│       ├── ping.py                        # Cog per comando ping
-│       ├── soundboards.py                 # Cog per soundboard
-│       ├── speakers_alias.json            # Alias degli speaker
-│       ├── TTS_COG.py                     # Cog principale di TTS
-│       ├── data/                          # Dati per server
-│       │   ├── index.json
-│       │   └── [server-ids]/
-│       │       ├── soundboard/
-│       │       ├── soundboards/
-│       │       └── speakers/
-│       ├── RVC/                           # Voice Conversion models
-│       │   ├── __init__.py
-│       │   ├── index.json
-│       │   ├── rvc.py
-│       │   ├── models/                    # Modelli RVC
-│       │   │   ├── arianagrande/
-│       │   │   ├── billieeilishep/
-│       │   │   ├── Geolier/
-│       │   │   └── ... (altri modelli)
-│       │   └── [server-ids]/
-│       │       └── temp/
-│       └── tests/                         # Test dei Cogs
-│
-├── HuggingFace/                            # Modelli da Hugging Face
-├── separated/                              # Audio separati
-│   └── htdemucs/
-└── discordbot.egg-info/                    # Metadata del pacchetto
-```
-
-## ⚙️ Configurazione
-
-### Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-DISCORD_TOKEN=your_discord_bot_token
-```
-
-## Discord Bot Setup
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application
-3. Go to "Bot" section and create a bot
-4. Copy the token and add it to `.env`
-5. Enable "Message Content Intent" under Privileged Gateway Intents
-6. Generate OAuth2 URL with scopes: `bot`, `applications.commands`
-7. Give the bot appropriate permissions in your test server
-
-## Dependencies
-
-### Core
-- **discord.py** - Discord API wrapper
-- **TTS** - Coqui Text-to-Speech
-- **torch/torchaudio** - ML framework for TTS
-- **transformers** - HuggingFace transformers for TTS
-- **python-dotenv** - Environment variable management
-
-### Development
-- **pytest** - Testing framework
-- **black** - Code formatter
-- **pylint** - Code linter
-- **mypy** - Type checker
-- **isort** - Import sorter
-- **flake8** - Code quality checker
-
-## Troubleshooting
-
-### FFmpeg not found
-```bash
-# Windows (with Chocolatey)
-choco install ffmpeg
-
-# macOS (with Homebrew)
-brew install ffmpeg
-
-# Linux (Ubuntu/Debian)
-sudo apt-get install ffmpeg
-```
-
-### Python version mismatch
-Ensure you're using Python 3.11+:
-```bash
-python --version
-```
-
-### Virtual environment not activating
-```bash
-# Windows
-.\venv\Scripts\Activate.ps1
-
-# Linux/macOS
-source venv/bin/activate
-```
-
-### Module import errors
-Clear Python cache and reinstall:
-```bash
-make clean
-make install-dev
-```
-
-## Contributing
-
-1. Create a feature branch: `git checkout -b feature/my-feature`
-2. Make your changes
-3. Run quality checks: `make pre-commit`
-4. Commit: `git commit -m "Add my feature"`
-5. Push: `git push origin feature/my-feature`
-6. Open a Pull Request
-
-## License
-
-MIT License - see LICENSE file for details
-
-## Author
-
-**drift** - DriftDeV
-
-## Support
-
-For issues and questions, please open an [issue on GitHub](https://github.com/DriftDeV/Python-DriftCoordBot/issues).
-
-## 📝 TODO List
-
-### Configurazione e Setup
-- [ ] Configurare il bot con il token di Discord
-- [ ] Aggiungere file `.env` con variabili di ambiente
-- [ ] Testare setup su Windows, macOS e Linux
-
-### Bug Fixes
-- [ ] Risolvere l'errore di sintassi in `TTS_COG.py` alla linea 169
-- [ ] Testare la compatibilità con le ultime versioni di discord.py
-
-### Features
-- [ ] Aggiungere nuove funzionalità al bot
-- [ ] Migliorare la clonazione vocale
-- [ ] Aggiungere supporto per più lingue
-- [ ] Implementare nuovi modelli RVC
-
-### Testing e Qualità
-- [ ] Testare il bot in un server Discord reale
-- [ ] Aggiungere test unitari completi
-- [ ] Aumentare la copertura dei test
-- [ ] Setup di CI/CD con GitHub Actions
-
-### Documentazione
-- [ ] Documentare ulteriormente le funzionalità del bot
-- [ ] Creare tutorial video per l'uso
-- [ ] Aggiungere esempi di utilizzo per ogni comando
-- [ ] Documentare l'API dei Cogs
-
-### Release
-- [ ] Rilasciare una versione stabile (v1.0.0)
-- [ ] Creare changelog completo
-- [ ] Pubblicare il bot su Discord Bot listing sites
+DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale e soundboard.  
+Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo — anche un bambino di 5 anni dovrebbe riuscirci.
 
 ---
 
-**Last Updated:** December 2025
+## In 3 passi (super semplice)
+1. Scarica il progetto:
+```bash
+git clone https://github.com/DriftDeV/DriftBot.git
+cd DriftBot
+```
+2. Crea l'ambiente Python e installa dipendenze:
+- Linux / macOS:
+```bash
+python3.10 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+- Windows (PowerShell):
+```powershell
+python -m venv venv
+. .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+3. Metti il token di Discord in un file `.env` nella cartella principale:
+```env
+DISCORD_TOKEN=il_tuo_token
+```
+Poi avvia:
+```bash
+make run
+# oppure
+python src/main.py
+```
 
+---
+
+## Istruzioni per sistema operativo (comandi essenziali)
+
+- Ubuntu / Debian:
+```bash
+sudo apt update
+sudo apt install -y python3.10 python3.10-venv ffmpeg git
+```
+
+- Fedora:
+```bash
+sudo dnf install -y python3.10 python3.10-devel ffmpeg git
+```
+
+- macOS (con Homebrew):
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install python@3.10 ffmpeg git
+```
+
+- Windows:
+  1. Installa Python 3.10 dal sito ufficiale.
+  2. Apri PowerShell come amministratore e, se vuoi lo script di setup:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\setup-windows.ps1
+```
+  3. Installa ffmpeg (es. con Chocolatey: `choco install ffmpeg`) o scarica binari.
+
+---
+
+## Dove mettere i modelli RVC (passaggi semplici)
+1. Vai nella cartella del progetto e crea la cartella dei modelli:
+```
+src/RVC/models/
+```
+2. Per ogni modello crea una cartella che contiene i file del modello (es. pesi, config). Esempio:
+```
+src/RVC/models/arianagrande/
+src/RVC/models/billieeilishep/
+```
+3. Apri (o crea) il file `src/RVC/index.json` e mappa i nomi dei modelli così:
+```json
+{
+  "nome_modello_leggibile": "nome_cartella_del_modello",
+  "aria": "arianagrande",
+  "billie": "billieeilishep"
+}
+```
+- La chiave è il nome che userai nel bot, il valore è il nome della cartella dentro `models/`.
+
+Esempio pratico:
+```json
+{
+  "arianagrande": "arianagrande",
+  "billie": "billieeilishep"
+}
+```
+
+---
+
+## Dove mettere gli speaker (per server) — struttura e file JSON
+Per ogni server Discord crea una cartella con l'ID del server dentro i dati del bot. Percorso consigliato:
+```
+src/cogs/data/<server-id>/
+```
+Dentro quella cartella crea due sottocartelle:
+- `speakers/` — per gli speaker personalizzati
+- `soundboard/` — per i suoni della soundboard
+
+Struttura:
+```
+src/cogs/data/123456789012345678/
+├─ speakers/
+│  ├─ index.json
+│  └─ alias.json
+└─ soundboard/
+   └─ index.json
+```
+
+- speakers/index.json — mappa nome_speaker -> file_wav
+```json
+{
+  "mio_speaker": "mio_speaker.wav",
+  "robot": "robot.wav"
+}
+```
+
+- speakers/alias.json — alias per gli speaker (opzionale)
+```json
+{
+  "bob": "mio_speaker",
+  "bobby": "mio_speaker"
+}
+```
+
+- soundboard/index.json — mappa nome_suono -> file_wav
+```json
+{
+  "applause": "applause.wav",
+  "laugh": "laugh.wav"
+}
+```
+
+Regole pratiche:
+- Metti i file .wav dentro la stessa cartella `speakers/` o `soundboard/`.
+- I nomi nei file JSON sono senza spazi e sensibili al progetto (usa underscore se vuoi).
+- Se preferisci un singolo file chiamato `speaker.json` puoi usarlo con lo stesso contenuto di `index.json`, ma il bot cerca per default `index.json` e `alias.json`.
+
+---
+
+## Note importanti
+- Assicurati che i nomi delle cartelle dei modelli corrispondano a quelli in `src/RVC/index.json`.
+- Se aggiungi o modifichi file JSON, riavvia il bot perché rilegga i dati.
+- FFmpeg è richiesto per il lavoro con audio: se il bot dà errore "ffmpeg not found", installalo come indicato sopra.
+
+---
+
+## Risoluzione rapida problemi
+- "Module not found" → attiva il venv e reinstalla: `pip install -r requirements.txt`
+- "ffmpeg not found" → installa ffmpeg (vedi sopra)
+- Controlla la versione Python: `python --version` (consigliato 3.10+)
+
+---
+
+## Comandi utili per sviluppatori
+- Creare venv: `make venv` (se Makefile presente)
+- Installare dipendenze: `make install` o `pip install -r requirements.txt`
+- Eseguire bot: `make run` o `python src/main.py`
+
+---
+
+Se vuoi, posso:
+- Preparare un file README pronto da committare,
+- O creare esempi di index.json e alias.json già riempiti,
+- O tradurre questo README in inglese.
+
+Grazie — dimmi cosa preferisci e lo preparo subito!
