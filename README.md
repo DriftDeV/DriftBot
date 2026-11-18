@@ -5,6 +5,25 @@ Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker
 
 ---
 
+## Struttura del repository
+
+Questo repository contiene due bot Discord indipendenti:
+
+| Cartella | Linguaggio | Descrizione |
+|---|---|---|
+| `src/` (radice) | Python | **DriftBot**: TTS, clonazione vocale (RVC) e soundboard |
+| `DiscordMusicBot/` | Java 17 + Maven | **DiscordMusicBot**: semplice bot musicale (JDA + LavaPlayer) |
+
+Il bot musicale si avvia da `DiscordMusicBot/`: copia `.env.example` in `.env`, inserisci `TOKEN` e `PREFIX`, poi:
+```bash
+cd DiscordMusicBot
+mvn package
+java -jar target/DiscordBot-1.0-SNAPSHOT.jar
+```
+Le istruzioni qui sotto riguardano il bot Python (DriftBot).
+
+---
+
 ## In 3 passi (super semplice)
 1. Scarica il progetto:
 ```bash
