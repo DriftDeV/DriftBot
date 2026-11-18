@@ -14,7 +14,7 @@ echo "🛠️ Installazione GCC, G++, Make e Git..."
 sudo dnf install -y gcc gcc-c++ make git curl wget
 # 3. Installazione Python e librerie di sviluppo
 echo "🐍 Installazione Python3, Pip e pacchetti Devel..."
-sudo dnf install -y python3 python3-pip python3-devel
+sudo dnf install -y python3 python3-pip python3-devel espeak-ng
 
 # GPU: ./fedora-deps.sh [nvidia|amd|none]   (default: rilevamento automatico)
 GPU="${1:-auto}"

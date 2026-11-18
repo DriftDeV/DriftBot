@@ -84,6 +84,7 @@ class FakeInteraction:
         self.user = SimpleNamespace(
             id=user_id,
             name=name,
+            display_name=name,
             mention=f"<@{user_id}>",
             voice=SimpleNamespace(channel=channel) if channel else None,
         )

@@ -1,6 +1,6 @@
 # DriftBot — Guida semplice e veloce
 
-DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale, soundboard, musica e generazione di musica con l'AI.  
+DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale, voce robotica per chi non può parlare, soundboard, musica e generazione di musica con l'AI.  
 Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo.
 
 ---
@@ -19,6 +19,37 @@ Serve FFmpeg (già richiesto dal resto del bot).
 | `/setvolume <0-100>` | Imposta il volume |
 
 Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene accodata solo la prima traccia.
+
+---
+
+## Voce robotica per chi non può parlare (`/parla`)
+
+`/parla testo:<cosa dire> [voce] [velocita] [lingua]` fa **leggere il testo dal bot nel tuo canale vocale**. È pensato per chi in quel momento non può parlare (si trova in un posto silenzioso, ha il microfono rotto, o non può proprio farlo): scrive e il bot parla al suo posto.
+
+È una **sintesi vocale classica, non AI**: usa [eSpeak NG](https://github.com/espeak-ng/espeak-ng), il tipico sintetizzatore dal suono robotico. Non scarica nessun modello, non usa la GPU e risponde in pochi millisecondi.
+
+| Opzione | Descrizione |
+|---|---|
+| `testo` | Cosa deve dire il bot (fino a 300 caratteri) |
+| `voce` | Robot (default), Robot grave, Robot acuta, Sussurro |
+| `velocita` | Lenta, Normale (default), Veloce |
+| `lingua` | Italiano (default), English, Español, Français, Deutsch, Português |
+
+`/parla-stop` interrompe la voce e svuota la coda (solo da chi è nel canale vocale del bot).
+
+- **Il testo compare anche nel canale**, così chi ascolta e chi scrive vedono la stessa cosa. Menzioni, link ed emoji personalizzate vengono resi leggibili (`@nome` → il nome, link → "link").
+- **A turno:** se più persone scrivono insieme il bot parla in coda, senza interrompere nessuno (max 3 messaggi in coda per persona e 10 per server; un messaggio ogni 3 secondi per utente).
+- **Non interrompe la musica:** se il bot sta riproducendo altro audio (musica, AI cover...) lo dice e non legge nulla.
+- Esce dal canale vocale dopo un minuto di silenzio.
+
+**Serve `espeak-ng` sul computer dove gira il bot** (`make install-deps` lo installa su Linux e macOS):
+```bash
+sudo apt install espeak-ng        # Debian/Ubuntu
+sudo dnf install espeak-ng        # Fedora
+brew install espeak-ng            # macOS
+winget install eSpeak-NG.eSpeak-NG  # Windows
+```
+Se si trova in un percorso insolito, indicalo nel `.env` con `ESPEAK_PATH=/percorso/di/espeak-ng`. Se non è installato `/parla` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
 
 ---
 
