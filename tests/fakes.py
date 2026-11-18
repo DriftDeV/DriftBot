@@ -100,6 +100,13 @@ class FakeInteraction:
         )
         self.followup = SimpleNamespace(send=self._send)
         self.followup_error = None  # se impostato, followup.send solleva questa eccezione
+        self.edits = []             # chiamate a edit_original_response
+        self.edit_error = None      # se impostato, edit_original_response solleva questa eccezione
+
+    async def edit_original_response(self, **kwargs):
+        if self.edit_error is not None:
+            raise self.edit_error
+        self.edits.append(kwargs)
 
     async def _send_first(self, content=None, **kwargs):
         self._done = True
