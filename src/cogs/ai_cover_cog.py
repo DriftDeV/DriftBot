@@ -1,35 +1,51 @@
-import discord
-import os
-import torch
 import asyncio
+import logging
 from pathlib import Path
-from discord.ext import commands
+from typing import Optional
+
+import discord
 from discord import app_commands
-import json
+from discord.ext import commands
+
+import gpu_utils
+from cogs import load_json
 from cogs.RVC import rvc
 
+log = logging.getLogger(__name__)
+
 CURRDIR = Path(__file__).parent.absolute()
+
+MAX_QUEUE = 10          # richieste massime in coda per tutto il bot
+IDLE_DISCONNECT = 30    # secondi di attesa a coda vuota prima di lasciare la vocale
+
 
 class AICover(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.queue = asyncio.Queue()
-        self.is_processing = False
-        self.worker_task = self.bot.loop.create_task(self.queue_worker())
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.worker_task: Optional[asyncio.Task] = None
+        self._idle_task: Optional[asyncio.Task] = None
+        self._busy = False  # True mentre il worker elabora o riproduce una richiesta
 
-    async def open_models_list(self):
-        models_json = CURRDIR / "RVC" / "index.json"
-        with open(models_json, "r", encoding="utf-8") as f:
-            return json.load(f)
+    async def cog_load(self) -> None:
+        rvc.purge_stale_jobs()
+        self.worker_task = asyncio.create_task(self.queue_worker())
 
-    async def vc_connect(self, interaction: discord.Interaction):
-        if not interaction.user.voice:
-            # Qui usiamo response perché non c'è ancora un defer
-            await interaction.response.send_message("❌ Devi essere in un canale vocale!", ephemeral=True)
+    async def cog_unload(self) -> None:
+        for task in (self.worker_task, self._idle_task):
+            if task and not task.done():
+                task.cancel()
+
+    async def open_models_list(self) -> dict:
+        return load_json(CURRDIR / "RVC" / "index.json")
+
+    async def vc_connect(self, member: discord.Member, guild: discord.Guild) -> Optional[discord.VoiceClient]:
+        """Connette (o sposta) il bot nel canale vocale di `member`. Non risponde a nessuna interazione."""
+        if not member.voice or member.voice.channel is None:
             return None
 
-        target_channel = interaction.user.voice.channel
-        vc = interaction.guild.voice_client
+        target_channel = member.voice.channel
+        vc = guild.voice_client
 
         try:
             if vc is None:
@@ -38,12 +54,35 @@ class AICover(commands.Cog):
                 await vc.move_to(target_channel)
             return vc
         except Exception as e:
-            print(f"Errore connessione vocale: {e}")
+            log.error("Errore connessione vocale: %s", e)
             return None
 
+    async def _notify(self, interaction: discord.Interaction, **kwargs) -> None:
+        """
+        Invia un messaggio per questa richiesta senza mai sollevare eccezioni.
+        Il token di un'interazione dura 15 minuti, ma una cover può metterci di più (coda inclusa):
+        se il followup non funziona più si ripiega sul canale testuale.
+        """
+        try:
+            await interaction.followup.send(**kwargs)
+            return
+        except discord.HTTPException as e:
+            log.debug("followup non disponibile (%s): provo sul canale", e)
+        channel = interaction.channel
+        if channel is None:
+            return
+        try:
+            await channel.send(**kwargs)
+        except discord.HTTPException as e:
+            log.warning("Impossibile notificare l'utente: %s", e)
+
     async def model_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        models = await self.open_models_list()
-        return [app_commands.Choice(name=name, value=filename) for name, filename in models.items() if current.lower() in name.lower()][:25]
+        try:
+            models = await self.open_models_list()
+        except Exception as e:
+            log.warning("Autocomplete modelli fallito: %s", e)
+            return []
+        return [app_commands.Choice(name=name[:100], value=filename[:100]) for name, filename in models.items() if current.lower() in name.lower()][:25]
 
     @app_commands.command(name="ai-cover", description="crea una cover ai della tua canzone preferita")
     @app_commands.describe(url="il link del video youtube", model="da chi vuoi far cantare la canzone", pitch="Trasposizione Default 0")
@@ -56,15 +95,24 @@ class AICover(commands.Cog):
     ])
     async def ai_cover(self, interaction: discord.Interaction, url: str, model: str, pitch : int = 0):
         # Controllo iniziale voce
-        if not interaction.user.voice:
+        if not interaction.user.voice or interaction.user.voice.channel is None:
             return await interaction.response.send_message("❌ Devi essere in un canale vocale!", ephemeral=True)
 
-        # 1. Connessione Vocale
-        vc = await self.vc_connect(interaction)
-        if not vc:
-            return
+        # Validazione input (URL http(s) e modello dentro la cartella dei modelli)
+        try:
+            url = rvc.validate_url(url)
+            rvc.resolve_model(model)
+        except rvc.CoverError as e:
+            return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
 
-        # 2. Defer (necessario perché l'operazione dura più di 3 secondi)
+        if self.queue.qsize() >= MAX_QUEUE:
+            return await interaction.response.send_message(
+                "⏳ La coda è piena, riprova tra qualche minuto.", ephemeral=True
+            )
+
+        # Defer (necessario perché l'operazione dura più di 3 secondi).
+        # La connessione vocale avviene nel worker, quando tocca a questa richiesta:
+        # connettersi qui sposterebbe il bot a metà della canzone di qualcun altro.
         await interaction.response.defer()
 
         item = {
@@ -77,87 +125,145 @@ class AICover(commands.Cog):
         await self.queue.put(item)
         pos = self.queue.qsize()
         embed = discord.Embed(
-            title=f"✅ In coda!",
+            title="✅ In coda!",
             description="Sei in coda, aspetta il tuo turno!",
             color=discord.Color.yellow()
         )
         embed.add_field(name="Posizione", value=f"{pos}")
         embed.add_field(name="Modello", value=f"{model}")
-        await interaction.followup.send(embed=embed)
+        await self._notify(interaction, embed=embed)
 
     async def queue_worker(self) :
         while True :
             item = await self.queue.get()
-            interaction = item["interaction"]
-            url = item["url"]
-            model = item["model"]
-            pitch = item["Pitch"]
+            self._busy = True
             try:
-                # 1. Connessione/Controllo VC
-                vc = await self.vc_connect(interaction)
-                if not vc:
-                    await interaction.followup.send("⚠️ Non sono riuscito a connettermi al canale vocale. Salto...")
-                    continue
-
-                # 2. Generazione AI (Operazione pesante)
-                embed = discord.Embed(
-                    title=f"🎙️ Generazione in corso...",
-                    description="Generazione in corso, Attendi ci vorra un po...",
-                    color=discord.Color.blue()
+                await self._process(item)
+            except asyncio.CancelledError:
+                raise
+            except rvc.CoverError as e:
+                await self._notify(
+                    item["interaction"],
+                    content=f"❌ {item['interaction'].user.mention} {e}",
                 )
-                embed.add_field(name="Utente", value=f"{interaction.user.mention}")
-                await interaction.followup.send(embed=embed)
-
-                output_path = await rvc.ai_cover(interaction, model, url, pitch)
-
-                if not os.path.exists(output_path):
-                    raise FileNotFoundError(f"File audio non trovato.")
-
-                # 3. Riproduzione e Attesa
-                if vc.is_playing():
-                    vc.stop()
-
-                # Evento per capire quando la canzone finisce
-                play_done = asyncio.Event()
-
-                def after_playing(error):
-                    if error:
-                        print(f"Errore riproduzione: {error}")
-                    # Segnala che la riproduzione è finita
-                    self.bot.loop.call_soon_threadsafe(play_done.set)
-
-                source = discord.FFmpegPCMAudio(output_path)
-                vc.play(source, after=after_playing)
-
-                embed = discord.Embed(
-                    title="🎶Riproduzione in Corso!",
-                    color=discord.Color.green()
-                )
-                embed.add_field(name="Modello", value=f"{model}")
-                embed.add_field(name="Richiesto da", value=f"{interaction.user.mention}")
-                await interaction.followup.send(embed=embed)
-
-                # ASPEPTA che la canzone finisca prima di passare al prossimo elemento della coda
-                await play_done.wait()
-
-                if self.queue.empty():
-                    # Aspetta magari 30 secondi prima di disconnettersi
-                    await asyncio.sleep(30)
-                    if self.queue.empty() and vc.is_connected():
-                        await vc.disconnect()
-
             except Exception as e:
-                print(f"Errore nel worker: {e}")
-                try:
-                    await interaction.followup.send(f"❌ Errore con la richiesta di {interaction.user.mention}: {e}")
-                except: pass
+                log.exception("Errore nel worker AI cover")
+                if gpu_utils.is_out_of_memory(e):
+                    text = "memoria GPU esaurita: riprova con una canzone più corta."
+                else:
+                    text = "errore imprevisto durante la generazione della cover."
+                await self._notify(
+                    item["interaction"],
+                    content=f"❌ Errore con la richiesta di {item['interaction'].user.mention}: {text}",
+                )
             finally:
-                # Pulizia GPU e segnalazione fine task
-                torch.cuda.empty_cache()
+                # Pulizia GPU (CUDA e ROCm) e segnalazione fine task
+                self._busy = False
+                gpu_utils.free_gpu_memory()
                 self.queue.task_done()
+
+            if self.queue.empty():
+                self._schedule_idle_disconnect(item["interaction"].guild)
+
+    async def _process(self, item: dict) -> None:
+        interaction: discord.Interaction = item["interaction"]
+        guild = interaction.guild
+        user = interaction.user
+
+        # 1. Connessione/Controllo VC
+        vc = await self.vc_connect(user, guild)
+        if not vc:
+            await self._notify(
+                interaction,
+                content=f"⚠️ {user.mention} non sono riuscito a connettermi al tuo canale vocale. Salto...",
+            )
+            return
+
+        # 2. Generazione AI (Operazione pesante, in un thread)
+        embed = discord.Embed(
+            title="🎙️ Generazione in corso...",
+            description="Generazione in corso, Attendi ci vorra un po...",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Utente", value=f"{user.mention}")
+        await self._notify(interaction, embed=embed)
+
+        output_path = await rvc.ai_cover(interaction.guild_id, item["model"], item["url"], item["Pitch"])
+        try:
+            if not output_path.exists():
+                raise FileNotFoundError("File audio non trovato.")
+
+            # 3. Riproduzione e Attesa. La generazione può essere durata minuti: ricontrollo la vocale.
+            vc = await self.vc_connect(user, guild)
+            if not vc:
+                await self._notify(
+                    interaction,
+                    content=f"⚠️ {user.mention} la cover è pronta ma non sei più in un canale vocale.",
+                )
+                return
+
+            if vc.is_playing():
+                vc.stop()
+
+            # Evento per capire quando la canzone finisce
+            loop = asyncio.get_running_loop()
+            play_done = asyncio.Event()
+
+            def after_playing(error):
+                if error:
+                    log.error("Errore riproduzione: %s", error)
+                # Segnala che la riproduzione è finita
+                loop.call_soon_threadsafe(play_done.set)
+
+            vc.play(discord.FFmpegPCMAudio(str(output_path)), after=after_playing)
+
+            embed = discord.Embed(
+                title="🎶Riproduzione in Corso!",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Modello", value=f"{item['model']}")
+            embed.add_field(name="Richiesto da", value=f"{user.mention}")
+            await self._notify(interaction, embed=embed)
+
+            # ASPEPTA che la canzone finisca prima di passare al prossimo elemento della coda
+            # (con un limite: se `after` non scattasse mai la coda non deve bloccarsi per sempre)
+            try:
+                await asyncio.wait_for(play_done.wait(), timeout=rvc.MAX_SONG_SECONDS + 60)
+            except asyncio.TimeoutError:
+                log.warning("Timeout in attesa della fine della riproduzione")
+                if vc.is_connected():
+                    vc.stop()
+        finally:
+            rvc.cleanup_job(output_path)
+
+    def _schedule_idle_disconnect(self, guild: Optional[discord.Guild]) -> None:
+        if guild is None:
+            return
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = asyncio.create_task(self._idle_disconnect(guild))
+
+    async def _idle_disconnect(self, guild: discord.Guild) -> None:
+        # Aspetta qualche secondo prima di disconnettersi, senza bloccare il worker
+        try:
+            await asyncio.sleep(IDLE_DISCONNECT)
+        except asyncio.CancelledError:
+            return
+        vc = guild.voice_client
+        # Non lasciare la vocale se nel frattempo c'è altro audio (es. musica) o una nuova richiesta
+        if self.queue.empty() and not self._busy and vc and vc.is_connected() and not vc.is_playing():
+            try:
+                await vc.disconnect()
+            except Exception as e:
+                log.warning("Disconnessione per inattività fallita: %s", e)
 
     @app_commands.command(name="skip", description="Salta la canzone attualmente in riproduzione")
     async def skip(self, interaction: discord.Interaction):
+            # Se sta suonando musica (cog Music) salta quella traccia
+            music = self.bot.get_cog("Music")
+            if music is not None and await music.skip_if_active(interaction):
+                return
+
             vc = interaction.guild.voice_client
 
             # 1. Controlla se il bot è connesso e sta riproducendo qualcosa

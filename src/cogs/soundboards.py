@@ -1,18 +1,15 @@
-import asyncio
-import os
-import uuid
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
-from cogs import get_guild_dir, get_guild_json
+import logging
+
 import discord
-import torchaudio as ta
 from discord import app_commands
 from discord.ext import commands
-import json
 
-# -- Variabili Costanti --
-CURRDIR = Path(__file__).parent.absolute()
+from cogs import get_guild_dir, get_guild_json, load_json, resolve_in_dir
+
+log = logging.getLogger(__name__)
+
+# Cartella (dentro data/<server-id>/) con index.json e i file audio, come descritto nel README.
+SOUNDBOARD_FOLDER = "soundboard"
 
 
 class Soundboards(commands.Cog) :
@@ -25,43 +22,41 @@ class Soundboards(commands.Cog) :
     def __init__(self, bot : commands.Bot) :
         self.bot = bot
 
-    async def oepn_sound_index(self, interaction : discord.Interaction) :
-        sound_index = await get_guild_json(interaction.guild_id, "soundboard")
-        with open(sound_index, "r", encoding="utf-8") as f :
-            return json.load(f)
+    async def open_sound_index(self, guild_id : int) -> dict :
+        sound_index = await get_guild_json(guild_id, SOUNDBOARD_FOLDER)
+        return load_json(sound_index)
 
-    async def vc_connect(self, interaction : discord.Interaction) :
-        if not interaction.user.voice:
-            await interaction.response.send_message(
-                "❌ You must be in a voice channel!",
-                ephemeral=True,
-            )
-            return -1
-
+    async def vc_connect(self, interaction : discord.Interaction) -> discord.VoiceClient | None :
+        """
+        Connette (o sposta) il bot nel canale vocale dell'utente.
+        Restituisce il voice client oppure None se non è possibile (risponde già all'utente).
+        L'interazione deve avere già fatto defer().
+        """
         target_channel = interaction.user.voice.channel
         vc = interaction.guild.voice_client
 
         try:
             if vc is None:
                 vc = await target_channel.connect()
-                print(f"Connected to: {target_channel.name}")
+                log.info("Connected to: %s", target_channel.name)
             elif vc.channel.id != target_channel.id:
                 await vc.move_to(target_channel)
-                print("CONNECTION ERROR")
-                return vc
+            return vc
         except Exception as e:
-            print(f"Voice connection error: {e}")
-            await interaction.followup.send(
-                "❌ Cannot connect to voice channel."
-            )
-            return -1
+            log.error("Voice connection error: %s", e)
+            await interaction.followup.send("❌ Cannot connect to voice channel.", ephemeral=True)
+            return None
 
     async def sound_autocomplete(self,
                                  interaction : discord.Interaction,
                                  current : str) -> list[app_commands.Choice[str]]:
-        sounds = await self.oepn_sound_index(interaction)
+        try:
+            sounds = await self.open_sound_index(interaction.guild_id)
+        except Exception as e:
+            log.warning("Autocomplete soundboard fallito: %s", e)
+            return []
 
-        return [app_commands.Choice(name=name, value=filename)
+        return [app_commands.Choice(name=name[:100], value=filename[:100])
             for name, filename in sounds.items()
             if current.lower() in name.lower()][:25]
 
@@ -69,32 +64,38 @@ class Soundboards(commands.Cog) :
     @app_commands.command(name="soundboard", description="Riproduci un suono da una lista di suoni")
     @app_commands.describe(soundfile="Il souno che desideri venga riprodotto")
     @app_commands.autocomplete(soundfile=sound_autocomplete)
-    async def connect(self,interaction : discord.Interaction,soundfile : str) :
-        sound_dir = await get_guild_dir(interaction.guild_id, "soundboards")
-        soundfile = sound_dir / soundfile
+    async def soundboard(self, interaction : discord.Interaction, soundfile : str) :
+        if not interaction.user.voice or interaction.user.voice.channel is None :
+            return await interaction.response.send_message(
+                "❌ You must be in a voice channel!", ephemeral=True
+            )
 
-        # Connettiti Alla vocale
-        await self.vc_connect(interaction)
-        vc = interaction.guild.voice_client
-            # Riproduci il suono..
-        if vc != -1 :
-            try :
-                if vc.is_playing() :
-                    vc.stop()
-            except Exception as e :
-                pass
+        # La connessione vocale può superare i 3 secondi concessi per rispondere
+        await interaction.response.defer()
 
-            try :
-                source = discord.FFmpegPCMAudio(soundfile)
-                vc.play(source)
-                await interaction.response.send_message(f"🔊|Suono Riprodotto")
-            except Exception as e :
-                print(f"Eccezzione : {e}")
+        sound_dir = await get_guild_dir(interaction.guild_id, SOUNDBOARD_FOLDER)
+        # `soundfile` arriva dall'utente: deve restare dentro la cartella del soundboard
+        sound_path = resolve_in_dir(sound_dir, soundfile)
+        if sound_path is None or not sound_path.is_file() :
+            return await interaction.followup.send("❌ Suono non trovato.", ephemeral=True)
 
+        vc = await self.vc_connect(interaction)
+        if vc is None :
+            return
 
+        try :
+            if vc.is_playing() :
+                vc.stop()
+            vc.play(discord.FFmpegPCMAudio(str(sound_path)))
+        except Exception as e :
+            log.error("Errore di riproduzione soundboard: %s", e)
+            return await interaction.followup.send(
+                "❌ Impossibile riprodurre il suono (FFmpeg installato?).", ephemeral=True
+            )
+
+        await interaction.followup.send("🔊|Suono Riprodotto")
 
 
 async def setup(bot: commands.Bot) -> None:
     """Setup function to load the cog."""
     await bot.add_cog(Soundboards(bot))
-

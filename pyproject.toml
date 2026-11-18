@@ -72,6 +72,10 @@ dev = [
     "ruff>=0.14.10",
 ]
 
+# NOTA: gli extra non possono scegliere l'indice dei wheel PyTorch. Per avere la build giusta
+# (CUDA o ROCm) usa `make install GPU=cuda|rocm`, oppure installa prima torch a mano:
+#   pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 \
+#       --index-url https://download.pytorch.org/whl/rocm6.2.4   # AMD (oppure .../cu124 per NVIDIA)
 # Supporto NVIDIA (CUDA 12.4+ come da requirements)
 nvidia = [
     "torch==2.6.0",
@@ -79,7 +83,7 @@ nvidia = [
     "torchvision==0.21.0",
 ]
 
-# Supporto AMD (ROCm 6.0/6.1)
+# Supporto AMD (ROCm 6.x): vedi la nota sopra, questo extra da solo NON installa la build ROCm
 amd = [
     "numpy<2.0.0",
     "cython>=3.0.0",
@@ -107,3 +111,9 @@ line_length = 100
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

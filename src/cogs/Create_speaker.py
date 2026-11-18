@@ -3,17 +3,24 @@ import wave
 import uuid
 import os
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import voice_recv
-import json
-from cogs import get_guild_dir, get_guild_json
+from cogs import get_guild_dir, get_guild_json, load_json, save_json
 import logging
+
+log = logging.getLogger(__name__)
 
 # Silenzia i log di info della libreria voice_recv
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
 # Configurazione cartella di salvataggio
 CURRDIR = Path(__file__).parent.absolute()
+
+MAX_RECORD_SECONDS = 180      # la registrazione si ferma da sola, così non cresce all'infinito
+MIN_RECORD_SECONDS = 3        # sotto questa durata il campione è inutilizzabile per il voice cloning
+BYTES_PER_SECOND = 48000 * 2 * 2   # 48kHz, 16 bit, stereo
+MAX_NAME_LENGTH = 40          # il nome file finisce in un Choice (max 100 caratteri)
 
 
 class UserSpecificSink(voice_recv.AudioSink):
@@ -30,6 +37,7 @@ class UserSpecificSink(voice_recv.AudioSink):
         self.file.setsampwidth(2)
         self.file.setframerate(48000)
         self._closed = False  # Flag per tracciare lo stato del file
+        self.bytes_written = 0
 
     def wants_opus(self) -> bool:
         return False
@@ -43,6 +51,7 @@ class UserSpecificSink(voice_recv.AudioSink):
             # Scrive solo se l'audio proviene dall'utente target
             if user == self.target_user:
                 self.file.writeframes(data.pcm)
+                self.bytes_written += len(data.pcm)
         except (ValueError, AttributeError, OSError):
             # Se il file viene chiuso mentre stiamo scrivendo, gestiamo l'errore silenziosamente
             pass
@@ -55,16 +64,55 @@ class UserSpecificSink(voice_recv.AudioSink):
             except Exception as e:
                 print(f"Errore durante la chiusura del file: {e}")
 
+    @property
+    def seconds(self) -> float:
+        return self.bytes_written / BYTES_PER_SECOND
+
+
 # Embedding RecordView
 class RecorderView(discord.ui.View):
     """
     View che contiene il pulsante per fermare la registrazione.
+    `on_finish` viene chiamata UNA volta (a mano o per timeout) e restituisce il messaggio finale.
     """
 
-    def __init__(self, vc: voice_recv.VoiceRecvClient, filename: str):
-        super().__init__(timeout=None)
+    def __init__(
+        self,
+        vc: voice_recv.VoiceRecvClient,
+        sink: UserSpecificSink,
+        origin: discord.Interaction,
+        on_finish: Callable[[], Awaitable[str]],
+    ):
+        super().__init__(timeout=MAX_RECORD_SECONDS)
         self.vc = vc
-        self.filename = filename
+        self.sink = sink
+        self.origin = origin
+        self.on_finish = on_finish
+        self._finished = False
+
+    async def _finish(self) -> Optional[str]:
+        """Ferma la registrazione, lascia la vocale e salva lo speaker. Idempotente."""
+        if self._finished:
+            return None
+        self._finished = True
+
+        try:
+            if self.vc.is_listening():
+                self.vc.stop_listening()
+        except Exception as e:
+            log.warning("stop_listening fallito: %s", e)
+        self.sink.cleanup()
+
+        try:
+            await self.vc.disconnect()
+        except Exception as e:
+            log.warning("disconnect fallito: %s", e)
+
+        try:
+            return await self.on_finish()
+        except Exception:
+            log.exception("Salvataggio dello speaker fallito")
+            return "❌ Errore durante il salvataggio dello speaker."
 
     @discord.ui.button(label="Interrompi Registrazione", style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -77,18 +125,34 @@ class RecorderView(discord.ui.View):
         await interaction.response.edit_message(view=self)
 
         # 2. Esegui le operazioni logiche
-        if self.vc.is_listening():
-            self.vc.stop_listening()
-
-        await self.vc.disconnect()
+        message = await self._finish()
 
         # 3. Invia messaggio di conferma finale
         # Nota: Usiamo followup perché abbiamo già risposto all'interazione con edit_message
-        await interaction.followup.send(
-            f"✅ Registrazione terminata e salvata in: `{self.filename}`",
-            ephemeral=True
-        )
+        if message:
+            await interaction.followup.send(message, ephemeral=True)
         self.stop()
+
+    async def on_timeout(self):
+        # Tempo massimo raggiunto senza che nessuno premesse il pulsante
+        message = await self._finish()
+        if message:
+            try:
+                await self.origin.followup.send(
+                    f"⏱️ Tempo massimo di {MAX_RECORD_SECONDS}s raggiunto. {message}", ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        log.error("Errore nella view di registrazione", exc_info=error)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ Errore imprevisto.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Errore imprevisto.", ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 class Create_Speaker(commands.Cog):
@@ -97,27 +161,19 @@ class Create_Speaker(commands.Cog):
         print("✅ Create_Speaker caricato...")
 
 
-    async def save_speaker(self, interaction : discord.Interaction, speaker_name : str, speaker_filename : str) :
-        SPEAKERSJSON = await get_guild_json(interaction.guild_id, "speakers")
-        ALIASJSON = await get_guild_json(interaction.guild_id, "speakers", json_name="alias.json")
-        with open(SPEAKERSJSON, "r", encoding="utf-8") as f:
-            speakers = json.load(f)
-        with open(ALIASJSON, "r", encoding="utf-8") as f:
-            speaker_aliases = json.load(f)
-            for original, alias in speaker_aliases.items() :
-                if original == speaker_name :
-                    speaker_name = alias
+    async def save_speaker(self, guild_id : int, speaker_name : str, speaker_filename : str) :
+        speakers_json = await get_guild_json(guild_id, "speakers")
+        alias_json = await get_guild_json(guild_id, "speakers", json_name="alias.json")
+        speakers = load_json(speakers_json)
+        speaker_aliases = load_json(alias_json)
 
+        speaker_name = speaker_aliases.get(speaker_name, speaker_name)
         speakers[speaker_name] = speaker_filename
+        save_json(speakers_json, speakers)
 
-        with open(SPEAKERSJSON, "w", encoding="utf-8") as f:
-            json.dump(speakers, f, indent=4)
-
-    async def get_speaker_name(self, filename) -> str :
-        SPEAKERSJSON = await get_guild_json(interaction.guild_id, "speakers")
-
-        with open(SPEAKERSJSON, "r", encoding="utf-8") as f:
-            current_speakers = json.load(f)
+    async def get_speaker_name(self, filename : str, guild_id : int) -> str :
+        speakers_json = await get_guild_json(guild_id, "speakers")
+        current_speakers = load_json(speakers_json)
         speaker_found = ""
         for speaker, value in current_speakers.items() :
             if value == filename :
@@ -129,13 +185,14 @@ class Create_Speaker(commands.Cog):
             interaction : discord.Interaction,
             current : str,
     ) -> list[app_commands.Choice[str]]:
-        SPEAKERSJSON = await get_guild_json(interaction.guild_id, "speakers")
+        try:
+            speakers_json = await get_guild_json(interaction.guild_id, "speakers")
+            current_speakers = load_json(speakers_json)
+        except Exception as e:
+            log.warning("Autocomplete speakers fallito: %s", e)
+            return []
 
-
-        with open(SPEAKERSJSON, "r", encoding="utf-8") as f:
-            current_speakers = json.load(f)
-
-        return [app_commands.Choice(name=name, value=filename)
+        return [app_commands.Choice(name=name[:100], value=filename[:100])
             for name, filename in current_speakers.items()
             if current.lower() in name.lower()][:25]
 
@@ -143,42 +200,70 @@ class Create_Speaker(commands.Cog):
     @app_commands.command(name="rename-speaker", description="Rename a Speaker")
     @app_commands.describe(new_name="il nome da dare (alias)")
     @app_commands.autocomplete(speaker=autocomplete_speakers)
-    async def rename_speaker(self, interaction : discord.Interaction, new_name : str, speaker : str) :
+    async def rename_speaker(
+        self,
+        interaction : discord.Interaction,
+        new_name : app_commands.Range[str, 1, 100],
+        speaker : str,
+    ) :
+        new_name = new_name.strip()
+        if not new_name:
+            return await interaction.response.send_message("❌ Il nome non può essere vuoto.", ephemeral=True)
+
         # Ricavo il nome dello speaker
-        current_name = await self.get_speaker_name(speaker)
+        current_name = await self.get_speaker_name(speaker, interaction.guild_id)
+        if not current_name:
+            return await interaction.response.send_message("❌ Speaker non trovato.", ephemeral=True)
 
         # Apro il file json degli speaker
-        SPEAKERSJSON = await get_guild_json(interaction.guild_id, "speakers")
-        ALIASJSON = await get_guild_json(interaction.guild_id, "speakers", json_name="alias.json")
-        with open(SPEAKERSJSON, "r", encoding="utf-8") as f:
-            current_speakers = json.load(f)
-            current_speakers[new_name] = current_speakers.pop(current_name)
+        speakers_json = await get_guild_json(interaction.guild_id, "speakers")
+        alias_json = await get_guild_json(interaction.guild_id, "speakers", json_name="alias.json")
+        current_speakers = load_json(speakers_json)
+        speaker_aliases = load_json(alias_json)
 
+        if new_name != current_name and new_name in current_speakers:
+            return await interaction.response.send_message(
+                f"❌ Esiste già uno speaker chiamato `{new_name}`.", ephemeral=True
+            )
+
+        current_speakers[new_name] = current_speakers.pop(current_name)
         # Aggiorno gli alias
-        with open(ALIASJSON, "r", encoding="utf-8") as f :
-            speaker_alisase = json.load(f)
-            speaker_alisase[current_name] = new_name
+        speaker_aliases[current_name] = new_name
 
         # Scrivo i Dati
-        with open(ALIASJSON, "w", encoding="utf-8") as f:
-            json.dump(speaker_alisase, f, indent=4)
-
-        with open(SPEAKERSJSON, "w", encoding="utf-8") as f:
-            json.dump(current_speakers, f, indent=4)
-
+        save_json(alias_json, speaker_aliases)
+        save_json(speakers_json, current_speakers)
 
         await interaction.response.send_message("✅ Speaker Rinominato!")
 
+    async def _get_recording_client(
+        self, channel: discord.VoiceChannel, guild: discord.Guild
+    ) -> voice_recv.VoiceRecvClient:
+        """
+        Restituisce un VoiceRecvClient nel canale richiesto. Gli altri cog (TTS, musica, soundboard)
+        si connettono con un VoiceClient normale, che non sa ascoltare: in quel caso, se non sta
+        riproducendo nulla, lo sostituisco; altrimenti segnalo che il bot è occupato.
+        """
+        vc = guild.voice_client
+        if vc is not None and not isinstance(vc, voice_recv.VoiceRecvClient):
+            if vc.is_playing():
+                raise RuntimeError("busy")
+            await vc.disconnect()
+            vc = None
+
+        if vc is None:
+            return await channel.connect(cls=voice_recv.VoiceRecvClient)
+        if vc.channel.id != channel.id:
+            await vc.move_to(channel)
+        return vc
+
     @app_commands.command(name="new-speaker", description="Registra la voce di un utente specifico")
     @app_commands.describe(target="L'utente da registrare (lascia vuoto per te stesso)")
-    async def create_speaker(self, interaction: discord.Interaction, target: discord.Member = None):
-        SPEAKERS_DIR = await get_guild_dir(interaction.guild_id, "speakers")
-        SPEAKERS_DIR.mkdir(parents=True, exist_ok=True) # Assicura che la cartella esista
-
+    async def create_speaker(self, interaction: discord.Interaction, target: Optional[discord.Member] = None):
         # Se nessun target è specificato, usa chi ha lanciato il comando
         target_user = target or interaction.user
 
-        if not interaction.user.voice:
+        if not interaction.user.voice or interaction.user.voice.channel is None:
             await interaction.response.send_message("❌ Devi essere in un canale vocale!", ephemeral=True)
             return
 
@@ -191,14 +276,18 @@ class Create_Speaker(commands.Cog):
 
         await interaction.response.send_message(f"🔄 Connessione a {channel.name}...", ephemeral=True)
 
+        SPEAKERS_DIR = await get_guild_dir(interaction.guild_id, "speakers")
+
         # Gestione connessione vocale
-        if interaction.guild.voice_client is None:
-            try:
-                vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
-            except Exception as e:
-                return await interaction.followup.send(f"❌ Errore di connessione: {e}", ephemeral=True)
-        else:
-            vc = interaction.guild.voice_client
+        try:
+            vc = await self._get_recording_client(channel, interaction.guild)
+        except RuntimeError:
+            return await interaction.followup.send(
+                "⚠️ Sto riproducendo audio: aspetta che finisca e riprova.", ephemeral=True
+            )
+        except Exception as e:
+            log.error("Errore di connessione vocale: %s", e)
+            return await interaction.followup.send("❌ Errore di connessione al canale vocale.", ephemeral=True)
 
         if vc.is_listening():
             return await interaction.followup.send("⚠️ Sto già registrando un'altra sessione!", ephemeral=True)
@@ -206,14 +295,41 @@ class Create_Speaker(commands.Cog):
         # Generazione nome file univoco
         unique_id = uuid.uuid4()
         # Pulizia nome utente più robusta
-        safe_username = "".join(x for x in target_user.name if x.isalnum() or x in "._-")
+        safe_username = "".join(x for x in target_user.name if x.isalnum() or x in "._-")[:MAX_NAME_LENGTH]
         if not safe_username:
             safe_username = "unknown_user"
 
-        filename = SPEAKERS_DIR / f"{safe_username}_{unique_id}.wav"
+        filename_only = f"{safe_username}_{unique_id}.wav"
+        filename = SPEAKERS_DIR / filename_only
 
         # Avvio ascolto filtrato
-        vc.listen(UserSpecificSink(str(filename), target_user))
+        sink = None
+        try:
+            sink = UserSpecificSink(str(filename), target_user)
+            vc.listen(sink)
+        except Exception as e:
+            log.error("Impossibile avviare la registrazione: %s", e)
+            if sink is not None:
+                sink.cleanup()
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+            return await interaction.followup.send("❌ Impossibile avviare la registrazione.", ephemeral=True)
+
+        async def on_finish() -> str:
+            # Lo speaker viene registrato solo ORA, a registrazione conclusa e con audio valido
+            if sink.seconds < MIN_RECORD_SECONDS:
+                try:
+                    os.remove(filename)
+                except OSError:
+                    pass
+                return (
+                    f"⚠️ Registrazione troppo breve ({sink.seconds:.1f}s, minimo {MIN_RECORD_SECONDS}s): "
+                    "nessuno speaker salvato."
+                )
+            await self.save_speaker(interaction.guild_id, target_user.name, filename_only)
+            return f"✅ Registrazione terminata ({sink.seconds:.0f}s) e salvata in: `{filename_only}`"
 
         # Creazione Embed
         embed = discord.Embed(
@@ -224,17 +340,11 @@ class Create_Speaker(commands.Cog):
         embed.add_field(name="Cartella", value=f"`{SPEAKERS_DIR}/`", inline=True)
         # Timestamp dinamico
         embed.add_field(name="Inizio", value=f"<t:{int(discord.utils.utcnow().timestamp())}:R>", inline=True)
-        embed.set_footer(text="Premi il pulsante per terminare e salvare.")
+        embed.set_footer(text=f"Premi il pulsante per terminare e salvare (max {MAX_RECORD_SECONDS}s).")
 
         # Invio Embed con Pulsante (tramite followup perché abbiamo già risposto con "Connessione...")
-        view = RecorderView(vc, str(filename))
+        view = RecorderView(vc, sink, interaction, on_finish)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-        await self.save_speaker(
-            interaction,
-            target_user.name,
-            speaker_filename=f"{safe_username}_{unique_id}.wav"
-        )
 
 
 

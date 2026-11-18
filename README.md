@@ -5,6 +5,53 @@ Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker
 
 ---
 
+## Comandi musica
+
+Il bot riproduce anche musica da URL o per nome (YouTube e tutti i siti supportati da `yt-dlp`), con coda per server.
+Serve FFmpeg (già richiesto dal resto del bot).
+
+| Comando | Descrizione |
+|---|---|
+| `/play <url o nome>` | Riproduce la canzone o la accoda se ne sta già suonando una |
+| `/skip` | Salta alla prossima traccia in coda |
+| `/pause` · `/resume` | Mette in pausa / riprende |
+| `/stop` | Ferma la riproduzione, svuota la coda ed esce dalla vocale |
+| `/setvolume <0-100>` | Imposta il volume |
+
+Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene accodata solo la prima traccia.
+
+## GPU: NVIDIA, AMD (ROCm) o CPU
+
+Il bot funziona su **NVIDIA (CUDA)**, **AMD (ROCm, solo Linux)** e CPU. Il backend viene rilevato da PyTorch:
+nel codice il device si chiama sempre `cuda`, sia su NVIDIA che su AMD.
+
+Installa PyTorch **dalla build giusta** (da fare prima delle altre dipendenze: `make install` lo fa da solo):
+```bash
+make install GPU=cuda    # NVIDIA
+make install GPU=rocm    # AMD
+make install GPU=cpu     # senza GPU
+make install             # rilevamento automatico (nvidia-smi = cuda, /dev/kfd = rocm, altrimenti cpu)
+```
+Se la build di PyTorch non corrisponde alla tua GPU, il bot parte lo stesso ma gira su CPU.
+Verifica con `make test-py`: mostra backend (CUDA/ROCm/CPU), nome della GPU e fa un test su tensore.
+
+**Solo per AMD (ROCm):**
+- L'utente deve stare nei gruppi `render` e `video` (`sudo usermod -aG render,video $USER`, poi riaccedi).
+- GPU consumer non ufficialmente supportate: imposta `HSA_OVERRIDE_GFX_VERSION` (RDNA2 es. RX 6600: `10.3.0`; RDNA3 es. RX 7600: `11.0.0`) nel file `.env` o nella shell.
+- L'indice dei wheel è `rocm6.2.4` (quello di torch 2.6.0). Per un altro: `make install-torch GPU=rocm TORCH_INDEX=https://download.pytorch.org/whl/<indice>`.
+
+**Variabili opzionali** (nel file `.env`):
+
+| Variabile | Effetto |
+|---|---|
+| `DRIFTBOT_DEVICE` | Forza il dispositivo, es. `cuda:1` per la seconda GPU, o `cpu` |
+| `AI_COVER_MAX_SECONDS` | Durata massima di un video per `/ai-cover` (default `900`) |
+| `AI_COVER_DEMUCS_TIMEOUT` | Timeout della separazione voce in secondi (default `1800`) |
+
+Se la VRAM non basta per separare la voce, `/ai-cover` ripiega automaticamente sulla CPU per quel passaggio.
+
+---
+
 ## In 3 passi (super semplice)
 1. Scarica il progetto:
 ```bash
@@ -12,11 +59,11 @@ git clone https://github.com/DriftDeV/DriftBot.git
 cd DriftBot
 ```
 2. Crea l'ambiente Python e installa dipendenze:
-- Linux / macOS:
+- Linux / macOS (scegli la GPU, vedi sezione sopra):
 ```bash
 python3.10 -m venv venv
 source venv/bin/activate
-make install
+make install GPU=rocm   # oppure GPU=cuda / GPU=cpu / niente per il rilevamento automatico
 ```
 - Windows (PowerShell):
 ```powershell
@@ -68,14 +115,14 @@ brew install python@3.10 ffmpeg git
 ## Dove mettere i modelli RVC (passaggi semplici)
 1. Vai nella cartella del progetto e crea la cartella dei modelli:
 ```
-src/RVC/models/
+src/cogs/RVC/models/
 ```
 2. Per ogni modello crea una cartella che contiene i file del modello (es. pesi, config). Esempio:
 ```
-src/RVC/models/arianagrande/
-src/RVC/models/billieeilishep/
+src/cogs/RVC/models/arianagrande/
+src/cogs/RVC/models/billieeilishep/
 ```
-3. Apri (o crea) il file `src/RVC/index.json` e mappa i nomi dei modelli così:
+3. Apri (o crea) il file `src/cogs/RVC/index.json` e mappa i nomi dei modelli così:
 ```json
 {
   "nome_modello_leggibile": "nome_cartella_del_modello",
@@ -146,7 +193,7 @@ Regole pratiche:
 ---
 
 ## Note importanti
-- Assicurati che i nomi delle cartelle dei modelli corrispondano a quelli in `src/RVC/index.json`.
+- Assicurati che i nomi delle cartelle dei modelli corrispondano a quelli in `src/cogs/RVC/index.json`.
 - Se aggiungi o modifichi file JSON, riavvia il bot perché rilegga i dati.
 - FFmpeg è richiesto per il lavoro con audio: se il bot dà errore "ffmpeg not found", installalo come indicato sopra.
 
