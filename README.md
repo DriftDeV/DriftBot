@@ -1,6 +1,6 @@
 # DriftBot — Guida semplice e veloce
 
-DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale e soundboard.  
+DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale, soundboard, musica e generazione di musica con l'AI.  
 Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo.
 
 ---
@@ -19,6 +19,44 @@ Serve FFmpeg (già richiesto dal resto del bot).
 | `/setvolume <0-100>` | Imposta il volume |
 
 Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene accodata solo la prima traccia.
+
+---
+
+## Generare musica con l'AI (ACE-Step)
+
+`/ace-step prompt:<descrizione> [durata:<secondi>] [testo:<testo canzone>]` genera un brano originale con [ACE-Step 1.5](https://github.com/ACE-Step/ACE-Step-1.5) e lo allega alla risposta.
+
+| Opzione | Descrizione |
+|---|---|
+| `prompt` | Genere, strumenti, mood. Es. `lofi hip hop, piano, rilassante` (3-500 caratteri) |
+| `durata` | Secondi, da 10 a `ACESTEP_MAX_SECONDS` (default 30) |
+| `testo` | Facoltativo. Testo con sezioni `[verse]`, `[chorus]`... Se vuoto il brano è strumentale |
+
+Ogni utente può avere una sola generazione alla volta. Se il file supera il limite di upload del server Discord, il bot lo dice e invita a scegliere una durata più breve.
+
+**ACE-Step gira come server separato**, non dentro il bot: il bot parla con il suo server REST. Così le dipendenze di ACE-Step non entrano in conflitto con quelle di TTS/RVC (`torch`, `transformers`) e CUDA o ROCm si scelgono nell'installazione del server. Installa e avvia il server (istruzioni ufficiali nel repository del progetto):
+```bash
+git clone https://github.com/ACE-Step/ACE-Step-1.5.git
+cd ACE-Step-1.5
+uv sync
+uv run acestep-api          # in ascolto su http://127.0.0.1:8001; i modelli si scaricano al primo avvio
+```
+Poi il bot lo trova da solo. Se il server è altrove o protetto da API key, imposta nel `.env`:
+
+| Variabile | Default | Effetto |
+|---|---|---|
+| `ACESTEP_API_URL` | `http://127.0.0.1:8001` | Indirizzo del server ACE-Step |
+| `ACESTEP_API_KEY` | vuota | API key del server (se l'hai attivata) |
+| `ACESTEP_MAX_SECONDS` | `180` | Durata massima richiedibile (il server accetta fino a 600) |
+| `ACESTEP_TIMEOUT` | `600` | Secondi massimi di attesa per un brano |
+| `ACESTEP_MAX_PENDING` | `5` | Richieste contemporanee accettate dal bot |
+| `ACESTEP_AUDIO_FORMAT` | `mp3` | `mp3`, `flac`, `opus`, `aac` o `wav` |
+
+⚠️ **GPU condivisa:** ACE-Step, TTS e AI cover usano tutti la GPU. Con poca VRAM conviene avviare il server ACE-Step su un'altra GPU (`CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD) o su un'altra macchina (`ACESTEP_API_URL`). Il supporto AMD ROCm del server è dichiarato dal progetto ACE-Step: controlla i requisiti nella sua documentazione.
+
+Se il server non è avviato, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
+
+---
 
 ## GPU: NVIDIA, AMD (ROCm) o CPU
 
