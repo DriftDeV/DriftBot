@@ -30,7 +30,7 @@ class Soundboards(commands.Cog) :
         """
         Connette (o sposta) il bot nel canale vocale dell'utente.
         Restituisce il voice client oppure None se non è possibile (risponde già all'utente).
-        L'interazione deve avere già fatto defer().
+        L'interazione deve avere già fatto defer(): l'errore sostituisce il messaggio "sta pensando".
         """
         target_channel = interaction.user.voice.channel
         vc = interaction.guild.voice_client
@@ -44,7 +44,8 @@ class Soundboards(commands.Cog) :
             return vc
         except Exception as e:
             log.error("Voice connection error: %s", e)
-            await interaction.followup.send("❌ Cannot connect to voice channel.", ephemeral=True)
+            # Dopo un defer() pubblico Discord ignora `ephemeral` sul primo messaggio: l'errore è pubblico
+            await interaction.followup.send("❌ Non riesco a connettermi al canale vocale.")
             return None
 
     async def sound_autocomplete(self,
@@ -61,23 +62,25 @@ class Soundboards(commands.Cog) :
             if current.lower() in name.lower()][:25]
 
 
-    @app_commands.command(name="soundboard", description="Riproduci un suono da una lista di suoni")
-    @app_commands.describe(soundfile="Il souno che desideri venga riprodotto")
+    @app_commands.command(name="soundboard", description="Riproduce un suono dalla lista dei suoni del server")
+    @app_commands.describe(soundfile="Il suono da riprodurre")
     @app_commands.autocomplete(soundfile=sound_autocomplete)
     async def soundboard(self, interaction : discord.Interaction, soundfile : str) :
         if not interaction.user.voice or interaction.user.voice.channel is None :
             return await interaction.response.send_message(
-                "❌ You must be in a voice channel!", ephemeral=True
+                "❌ Devi essere in un canale vocale!", ephemeral=True
             )
+
+        # `soundfile` arriva dall'utente: deve restare dentro la cartella del soundboard.
+        # Si controlla PRIMA del defer: dopo un defer() pubblico Discord ignora `ephemeral`,
+        # mentre così l'errore resta visibile solo a chi ha lanciato il comando.
+        sound_dir = await get_guild_dir(interaction.guild_id, SOUNDBOARD_FOLDER)
+        sound_path = resolve_in_dir(sound_dir, soundfile)
+        if sound_path is None or not sound_path.is_file() :
+            return await interaction.response.send_message("❌ Suono non trovato.", ephemeral=True)
 
         # La connessione vocale può superare i 3 secondi concessi per rispondere
         await interaction.response.defer()
-
-        sound_dir = await get_guild_dir(interaction.guild_id, SOUNDBOARD_FOLDER)
-        # `soundfile` arriva dall'utente: deve restare dentro la cartella del soundboard
-        sound_path = resolve_in_dir(sound_dir, soundfile)
-        if sound_path is None or not sound_path.is_file() :
-            return await interaction.followup.send("❌ Suono non trovato.", ephemeral=True)
 
         vc = await self.vc_connect(interaction)
         if vc is None :
@@ -90,10 +93,10 @@ class Soundboards(commands.Cog) :
         except Exception as e :
             log.error("Errore di riproduzione soundboard: %s", e)
             return await interaction.followup.send(
-                "❌ Impossibile riprodurre il suono (FFmpeg installato?).", ephemeral=True
+                "❌ Impossibile riprodurre il suono (FFmpeg installato?)."
             )
 
-        await interaction.followup.send("🔊|Suono Riprodotto")
+        await interaction.followup.send("🔊 Suono riprodotto")
 
 
 async def setup(bot: commands.Bot) -> None:

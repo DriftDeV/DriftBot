@@ -19,7 +19,7 @@ async def test_every_cog_loads_and_command_names_are_unique():
 
     names = [command.name for command in bot.tree.get_commands()]
     assert len(names) == len(set(names))
-    assert {"ace-step", "play", "skip", "speak", "ai-cover", "soundboard", "ping"} <= set(names)
+    assert {"ace-step", "play", "skip", "tts-ai", "ai-cover", "soundboard", "ping", "tts", "tts-stop"} <= set(names)
 
     for module in modules:
         await bot.unload_extension(f"cogs.{module}")

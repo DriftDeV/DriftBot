@@ -71,8 +71,12 @@ class AICover(commands.Cog):
         channel = interaction.channel
         if channel is None:
             return
+        # Nel canale un embed da solo non notifica nessuno: si cita chi ha fatto la richiesta
+        channel_kwargs = dict(kwargs)
+        if not channel_kwargs.get("content"):
+            channel_kwargs["content"] = interaction.user.mention
         try:
-            await channel.send(**kwargs)
+            await channel.send(**channel_kwargs)
         except discord.HTTPException as e:
             log.warning("Impossibile notificare l'utente: %s", e)
 
@@ -84,8 +88,12 @@ class AICover(commands.Cog):
             return []
         return [app_commands.Choice(name=name[:100], value=filename[:100]) for name, filename in models.items() if current.lower() in name.lower()][:25]
 
-    @app_commands.command(name="ai-cover", description="crea una cover ai della tua canzone preferita")
-    @app_commands.describe(url="il link del video youtube", model="da chi vuoi far cantare la canzone", pitch="Trasposizione Default 0")
+    @app_commands.command(name="ai-cover", description="Crea una cover AI della tua canzone preferita")
+    @app_commands.describe(
+        url="Il link del video (YouTube e altri siti)",
+        model="Chi deve cantare la canzone",
+        pitch="Trasposizione in semitoni (default 0)",
+    )
     @app_commands.autocomplete(model=model_autocomplete)
     @app_commands.choices(
     pitch = [
@@ -277,10 +285,17 @@ class AICover(commands.Cog):
             # 3. Interrompi la riproduzione
             # Questo attiverà automaticamente la funzione 'after_playing' nel worker
             vc.stop()
-            embed = discord.Embed(
-                title="⏭️ Canzone saltata! Passo alla prossima..",
-                color=discord.Color.blue()
-            )
+            if self.queue.empty():
+                embed = discord.Embed(
+                    title="⏭️ Canzone saltata!",
+                    description="Non ci sono altre richieste in coda.",
+                    color=discord.Color.blue()
+                )
+            else:
+                embed = discord.Embed(
+                    title="⏭️ Canzone saltata! Passo alla prossima...",
+                    color=discord.Color.blue()
+                )
             await interaction.response.send_message(embed=embed)
 
 

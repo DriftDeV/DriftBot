@@ -1,6 +1,6 @@
 # DriftBot — Guida semplice e veloce
 
-DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale, soundboard, musica e generazione di musica con l'AI.  
+DriftBot è un bot Discord per Text‑to‑Speech (TTS), clonazione vocale, TTS con la voce di Giorgio per chi non può parlare, soundboard, musica e generazione di musica con l'AI.  
 Questo README ti spiega come installarlo e come aggiungere modelli RVC e speaker in modo semplicissimo.
 
 ---
@@ -19,6 +19,41 @@ Serve FFmpeg (già richiesto dal resto del bot).
 | `/setvolume <0-100>` | Imposta il volume |
 
 Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene accodata solo la prima traccia.
+
+---
+
+## TTS con la voce di Giorgio (`/tts`)
+
+`/tts testo:<cosa dire>` fa **leggere il testo dal bot nel tuo canale vocale** con la voce italiana **Giorgio** di [Amazon Polly](https://aws.amazon.com/polly/). È pensato per chi in quel momento non può parlare (si trova in un posto silenzioso, ha il microfono rotto, o non può proprio farlo): scrive e il bot parla al suo posto.
+
+(Il TTS ad AI con le voci clonate è `/tts-ai`.)
+
+- **Il testo compare anche nel canale**, così chi ascolta e chi scrive vedono la stessa cosa. Menzioni, link ed emoji personalizzate vengono resi leggibili (`@nome` → il nome, link → "link"). Fino a 300 caratteri.
+- **A turno:** se più persone scrivono insieme il bot parla in coda, senza interrompere nessuno (max 3 messaggi in coda per persona e 10 per server; un messaggio ogni 3 secondi per utente).
+- **Non interrompe la musica:** se il bot sta riproducendo altro audio (musica, AI cover...) lo dice e non legge nulla.
+- `/tts-stop` interrompe la lettura e svuota la coda (solo da chi è nel canale vocale del bot).
+- Esce dal canale vocale dopo un minuto di silenzio.
+
+### Configurazione (Amazon Polly)
+1. Nella console AWS crea un utente IAM con questo permesso minimo e generane una chiave di accesso:
+```json
+{"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "polly:SynthesizeSpeech", "Resource": "*"}]}
+```
+2. Mettila nel file `.env`:
+```env
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=eu-central-1
+```
+Se le credenziali mancano `/tts` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
+
+| Variabile | Default | Effetto |
+|---|---|---|
+| `AWS_REGION` | `eu-central-1` | Regione AWS (anche `AWS_DEFAULT_REGION`) |
+| `POLLY_ENGINE` | `standard` | Motore Polly: `standard`, `neural`, `long-form` o `generative`. Se la voce non lo supporta il bot lo dice e indica questa variabile |
+| `TTS_DAILY_CHARS` | `50000` | **Tetto giornaliero di caratteri** (0 = nessun tetto). Si azzera a mezzanotte UTC e al riavvio |
+
+> ℹ️ **Polly è a pagamento (a carattere) e il testo viene inviato ad AWS.** Per contenere la spesa il bot ha il tetto giornaliero qui sopra, i limiti per utente, e una **cache** delle frasi già sintetizzate: ripetere "sì", "no", "ciao" non costa nulla ed è istantaneo. Il testo viene inviato come testo semplice, mai come SSML. Controlla i prezzi correnti di Polly e valuta un budget in AWS Budgets.
 
 ---
 
@@ -92,7 +127,7 @@ Poi il bot li trova da solo. Se i server sono altrove o protetti, imposta nel `.
 ### Consigli per 8 GB
 - **Con Claude** la VRAM è tutta per ACE-Step: è la configurazione più semplice per schede piccole.
 - **ACE-Step:** il suo profilo per 8-12 GB tiene i modelli in RAM quando non servono (offload su CPU), ed è quello che permette all'LLM di usare la GPU mentre ACE-Step è fermo. Controlla con `nvidia-smi` (o `rocm-smi`) a server inattivo che la VRAM occupata sia poca; se non lo è, prova ad avviarlo con `MAX_CUDA_VRAM=8`.
-- ⚠️ **Il modello TTS (`/speak`) resta caricato in VRAM** per tutto il tempo in cui il bot è acceso, e AI cover usa la GPU a sua volta. Su una sola scheda da 8 GB non c'è spazio per tutto: usa una seconda GPU o un'altra macchina per ACE-Step/Ollama (`ACESTEP_API_URL`, `LYRICS_LLM_URL`; per scegliere la GPU `CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD), oppure disattiva il cog TTS.
+- ⚠️ **Il modello TTS ad AI (`/tts-ai`) resta caricato in VRAM** per tutto il tempo in cui il bot è acceso, e AI cover usa la GPU a sua volta. Su una sola scheda da 8 GB non c'è spazio per tutto: usa una seconda GPU o un'altra macchina per ACE-Step/Ollama (`ACESTEP_API_URL`, `LYRICS_LLM_URL`; per scegliere la GPU `CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD), oppure disattiva il cog TTS.
 - Il supporto AMD ROCm di ACE-Step e di Ollama è dichiarato dai rispettivi progetti: controlla i requisiti nella loro documentazione.
 
 Se un server non è raggiungibile, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.

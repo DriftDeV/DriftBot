@@ -73,7 +73,7 @@ class MyBot(commands.Bot):
             intents=intents,
             help_command=None,
             tree_cls=BotTree,
-            # Il bot ripete testo scritto dagli utenti (/speak) o preso dal web (titoli di /play):
+            # Il bot ripete testo scritto dagli utenti (/tts-ai) o preso dal web (titoli di /play):
             # blocca @everyone/@here e i ruoli, lascia solo i ping agli utenti.
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
         )

@@ -41,7 +41,6 @@ import io
 import json
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -52,6 +51,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import escape_md
 from lyrics_llm import DEFAULT_LANGUAGE, LANGUAGES, LyricsWriter
 from text_llm import LLMConfig, LLMError, TextGenerator, build_generator
 
@@ -60,6 +60,7 @@ log = logging.getLogger(__name__)
 SERVER_MIN_SECONDS = 10     # limiti del server ACE-Step
 SERVER_MAX_SECONDS = 600
 INSTRUMENTAL_LYRICS = "[Instrumental]"
+EMBED_SAFE_LIMIT = 5800     # il massimo di Discord è 6000 caratteri per embed
 ALLOWED_FORMATS = ("mp3", "flac", "opus", "aac", "wav")
 
 
@@ -359,10 +360,13 @@ class AceStepMusic(commands.Cog):
         channel = interaction.channel
         if channel is None:
             return
+        # Il token è scaduto (coda lunga): il risultato va nel canale e, siccome un embed non notifica,
+        # si cita chi lo aveva chiesto (solo lui: nessun'altra menzione è ammessa).
+        mention = interaction.user.mention
         try:
             await channel.send(
-                content=content, embed=embed, file=make_file(),
-                allowed_mentions=discord.AllowedMentions.none(),
+                content=f"{mention} {content}" if content else mention, embed=embed, file=make_file(),
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[interaction.user]),
             )
         except discord.HTTPException as e:
             log.warning("Impossibile consegnare il brano: %s", e)
@@ -544,7 +548,7 @@ class AceStepMusic(commands.Cog):
         embed = discord.Embed(title="🎵 Musica generata", color=discord.Color.purple())
         if lyrics:
             # il testo può contenere * o _ : senza escape romperebbe la formattazione
-            embed.description = re.sub(r"([*_`~|>\\])", r"\\\1", lyrics)[:4000]
+            embed.description = escape_md(lyrics)[:4000]
         embed.add_field(name="Prompt", value=prompt[:1024], inline=False)
         metas = details.get("metas") if isinstance(details.get("metas"), dict) else {}
         if source == "ai":
@@ -561,6 +565,12 @@ class AceStepMusic(commands.Cog):
             embed.add_field(name="⚠️ Nota", value=note[:1024], inline=False)
         embed.add_field(name="Richiesto da", value=interaction.user.mention, inline=True)
         embed.set_footer(text=f"ACE-Step · generato in {elapsed:.0f}s")
+        # Discord rifiuta embed oltre 6000 caratteri in totale (e allora il brano non arriverebbe):
+        # se serve si accorcia il testo, che è la parte più lunga
+        overflow = len(embed) - EMBED_SAFE_LIMIT
+        if overflow > 0 and embed.description:
+            keep = max(0, len(embed.description) - overflow - 1)
+            embed.description = embed.description[:keep].rstrip() + "…"
         return embed
 
 

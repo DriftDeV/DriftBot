@@ -51,14 +51,14 @@ def sb(data_dir, monkeypatch):
 async def test_soundboard_plays_file_from_the_documented_folder(sb):
     it = FakeInteraction(sb.guild, sb.channel)
     await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
-    assert it.last == "🔊|Suono Riprodotto"
+    assert it.last == "🔊 Suono riprodotto"
     assert sb.guild.voice_client.played[0].url.endswith("soundboard/clap.wav")
 
 
 async def test_soundboard_always_answers_when_not_in_voice(sb):
     it = FakeInteraction(sb.guild, None)
     await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
-    assert "voice channel" in it.last and it.sent[-1][1].get("ephemeral")
+    assert "canale vocale" in it.last and it.sent[-1][1].get("ephemeral")
 
 
 async def test_soundboard_rejects_path_traversal(sb):
@@ -66,6 +66,8 @@ async def test_soundboard_rejects_path_traversal(sb):
         it = FakeInteraction(sb.guild, sb.channel)
         await sb.cog.soundboard.callback(sb.cog, it, evil)
         assert it.last == "❌ Suono non trovato."
+        # l'errore è privato: si risponde PRIMA del defer, perché dopo un defer pubblico Discord ignora `ephemeral`
+        assert it.sent[-1][1].get("ephemeral") is True and not it.deferred
     assert sb.guild.voice_client is None       # non si è nemmeno connesso
 
 
@@ -73,7 +75,7 @@ async def test_soundboard_connection_and_ffmpeg_failures_are_reported(sb, monkey
     bad_channel = make_channel(sb.guild, fail_connect=True)
     it = FakeInteraction(sb.guild, bad_channel)
     await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
-    assert "Cannot connect" in it.last
+    assert "connettermi" in it.last
 
     def boom(path):
         raise RuntimeError("ffmpeg non trovato")
@@ -197,36 +199,122 @@ async def start_recording(sp, monkeypatch, **recv_kwargs):
     return it, recv
 
 
-async def test_speaker_is_saved_only_after_a_valid_recording(sp, monkeypatch):
+def panel(it):
+    """Il pannello di registrazione: (embed, view) dell'ultima modifica del messaggio."""
+    last = it.edits[-1]
+    return last["embed"], last["view"]
+
+
+async def click(view, user_id=42):
+    """Simula il click sul pulsante «Interrompi» (passando prima dal controllo di chi preme)."""
+    interaction = FakeInteraction(FakeGuild(7), None, user_id=user_id)
+    if await view.interaction_check(interaction):
+        await view.stop_button.callback(interaction)
+    return interaction
+
+
+async def test_recording_uses_a_single_private_message_without_server_paths(sp, monkeypatch):
+    it, _ = await start_recording(sp, monkeypatch)
+    # un solo messaggio ("Connessione...") che poi diventa il pannello: niente messaggio vecchio accanto
+    assert len(it.sent) == 1 and "Connessione" in it.sent[0][0] and it.sent[0][1]["ephemeral"] is True
+    embed, view = panel(it)
+    assert it.edits[-1]["content"] is None and embed.title == "🎙️ Registrazione in corso"
+    assert {f.name for f in embed.fields} == {"Inizio"}
+    everything = " ".join([embed.title, embed.description or "", embed.footer.text or ""] + [f.value for f in embed.fields])
+    assert str(sp.dir) not in everything and "/" not in everything.replace("<t:", "").replace(":R>", "")
+    view.stop()
+
+
+async def test_stop_button_turns_the_panel_into_the_saved_result(sp, monkeypatch):
     it, recv = await start_recording(sp, monkeypatch)
-    view = it.sent[-1][1]["view"]
+    _, view = panel(it)
     # a registrazione appena avviata lo speaker NON deve essere già in elenco
     assert not (sp.dir / "index.json").exists() or json.loads((sp.dir / "index.json").read_text()) == {}
 
     recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * (cs.BYTES_PER_SECOND * 4)))
-    message = await view._finish()
-    assert message.startswith("✅")
+    pressed = await click(view)
+
+    # risposta immediata (entro 3s): il pulsante sparisce subito e compare "Salvataggio in corso"
+    assert pressed.message_edits[0]["view"] is None and "Salvataggio" in pressed.message_edits[0]["embed"].title
+    # poi il pannello diventa il risultato: titolo, colore e testo finali, nessun pulsante, nessun "in corso" appeso
+    final = pressed.edits[-1]
+    assert final["view"] is None and final["embed"].title == "✅ Registrazione salvata"
+    assert final["embed"].color == discord.Color.green() and "alice" in final["embed"].description
+    assert "/tts-ai" in final["embed"].description and "in corso" not in final["embed"].title
+
     saved = json.loads((sp.dir / "index.json").read_text())
     assert list(saved) == ["alice"] and (sp.dir / saved["alice"]).exists()
-    assert await view._finish() is None          # idempotente: un secondo click non fa danni
-    view.stop()
+    assert not recv.connected and not recv.listening
 
 
-async def test_too_short_recording_is_discarded(sp, monkeypatch):
+async def test_too_short_recording_is_discarded_and_reported_as_a_warning(sp, monkeypatch):
     it, recv = await start_recording(sp, monkeypatch)
-    view = it.sent[-1][1]["view"]
+    _, view = panel(it)
     recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * 1000))
-    message = await view._finish()
-    assert "troppo breve" in message
+    pressed = await click(view)
+    final = pressed.edits[-1]
+    assert final["embed"].title == "⚠️ Registrazione non salvata" and "troppo breve" in final["embed"].description
+    assert final["embed"].color == discord.Color.orange()
     assert list(sp.dir.glob("*.wav")) == []      # file eliminato
-    assert json.loads((sp.dir / "index.json").read_text()) == {} if (sp.dir / "index.json").exists() else True
+    assert not (sp.dir / "index.json").exists() or json.loads((sp.dir / "index.json").read_text()) == {}
+
+
+async def test_a_second_click_does_nothing(sp, monkeypatch):
+    it, recv = await start_recording(sp, monkeypatch)
+    _, view = panel(it)
+    recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * (cs.BYTES_PER_SECOND * 4)))
+    first = await click(view)
+    second = await click(view)
+    # il secondo click viene solo confermato: non rimette "Salvataggio in corso" sopra il risultato finale
+    assert second.deferred and second.message_edits == [] and second.edits == []
+    assert first.edits[-1]["embed"].title == "✅ Registrazione salvata"
+
+
+async def test_only_the_user_who_started_the_recording_can_stop_it(sp, monkeypatch):
+    it, recv = await start_recording(sp, monkeypatch)
+    _, view = panel(it)
+    intruder = await click(view, user_id=999)
+    assert "Solo chi ha avviato" in intruder.last and intruder.sent[-1][1]["ephemeral"] is True
+    assert recv.listening and not view._stopping          # la registrazione continua
     view.stop()
 
 
-async def test_recording_start_failure_cleans_up(sp, monkeypatch):
+async def test_timeout_finishes_the_recording_and_updates_the_panel(sp, monkeypatch):
+    it, recv = await start_recording(sp, monkeypatch)
+    _, view = panel(it)
+    recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * (cs.BYTES_PER_SECOND * 4)))
+    await view.on_timeout()
+    final = it.edits[-1]
+    assert final["view"] is None and final["embed"].title == "✅ Registrazione salvata"
+    assert "Tempo massimo" in final["embed"].footer.text
+    edits_before = len(it.edits)
+    await view.on_timeout()                               # un secondo timeout non rifà nulla
+    assert len(it.edits) == edits_before
+
+
+async def test_timeout_after_the_button_was_pressed_is_a_noop(sp, monkeypatch):
+    it, recv = await start_recording(sp, monkeypatch)
+    _, view = panel(it)
+    recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * (cs.BYTES_PER_SECOND * 4)))
+    await click(view)
+    edits_before = len(it.edits)
+    await view.on_timeout()
+    assert len(it.edits) == edits_before
+
+
+async def test_errors_replace_the_connecting_message_instead_of_adding_another(sp, monkeypatch):
     it, _ = await start_recording(sp, monkeypatch, listen_error=RuntimeError("già in ascolto"))
-    assert "Impossibile avviare" in it.last
+    assert "Impossibile avviare" in it.edits[-1]["content"] and len(it.sent) == 1
     assert list(sp.dir.glob("*.wav")) == []
+
+    busy = FakeRecv(sp.channel)
+    busy.listening = True
+    async def busy_client(channel, guild):
+        return busy
+    monkeypatch.setattr(sp.cog, "_get_recording_client", busy_client)
+    it = FakeInteraction(sp.guild, sp.channel)
+    await sp.cog.create_speaker.callback(sp.cog, it, None)
+    assert "già registrando" in it.edits[-1]["content"] and len(it.sent) == 1
 
 
 async def test_speaker_command_requires_voice(sp):
@@ -643,12 +731,12 @@ async def test_tts_speak_guards(tts):
     tts.cog.model = None
     it = FakeInteraction(tts.guild, tts.channel)
     await callback(tts.cog, it, "ciao", "ref.wav", "it")
-    assert "not ready" in it.last
+    assert "non è pronto" in it.last
     tts.cog.model = FakeModel()
 
     it = FakeInteraction(tts.guild, None)
     await callback(tts.cog, it, "ciao", "ref.wav", "it")
-    assert "voice channel" in it.last
+    assert "canale vocale" in it.last
 
     it = FakeInteraction(tts.guild, tts.channel)
     await callback(tts.cog, it, "   ", "ref.wav", "it")
@@ -657,7 +745,8 @@ async def test_tts_speak_guards(tts):
     for evil in ("../../secret.wav", "/etc/passwd", "nope.wav"):
         it = FakeInteraction(tts.guild, tts.channel)
         await callback(tts.cog, it, "ciao", evil, "it")
-        assert "not found" in it.last
+        assert "Voce non trovata" in it.last
+        assert it.sent[-1][1].get("ephemeral") is True and not it.deferred   # errore privato, prima del defer
     assert tts.cog.model.thread is None                               # non ha mai generato
 
 
@@ -678,7 +767,7 @@ async def test_tts_disconnect_during_generation_and_ffmpeg_failure(tts, monkeypa
     tts.guild.voice_client = None
     it = FakeInteraction(tts.guild, tts.channel)
     await tts.cog.speak.callback(tts.cog, it, "ciao", "ref.wav", "it")
-    assert "Playback error" in it.last and "no ffmpeg" not in it.last
+    assert "Impossibile riprodurre" in it.last and "no ffmpeg" not in it.last
     assert tts_files() == before                                       # nessun file orfano
 
 

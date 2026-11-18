@@ -22,6 +22,8 @@ import yt_dlp
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import escape_md
+
 log = logging.getLogger(__name__)
 
 MAX_VOLUME = 100          # come nella versione Java
@@ -85,6 +87,14 @@ def extract_track(query: str) -> Track:
         webpage_url=info.get("webpage_url") or info.get("original_url") or target,
         stream_url=info["url"],
     )
+
+
+def fmt(text: str, limit: int = 100) -> str:
+    """Titolo/autore preso dal web: senza markdown che rovina il messaggio e con una lunghezza sensata."""
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return escape_md(text)
 
 
 class GuildPlayer:
@@ -260,12 +270,12 @@ class Music(commands.Cog):
 
         if starting:
             await interaction.followup.send(
-                f"🎵 Track caricata: **{track.title}** di **{track.author}**"
+                f"🎵 Traccia caricata: **{fmt(track.title)}** di **{fmt(track.author)}**"
             )
         else:
             await interaction.followup.send(
                 f"➕ Aggiunta in coda (posizione {len(player.queue)}): "
-                f"**{track.title}** di **{track.author}**"
+                f"**{fmt(track.title)}** di **{fmt(track.author)}**"
             )
 
     @app_commands.command(name="pause", description="Mette in pausa la traccia")
@@ -347,7 +357,7 @@ class Music(commands.Cog):
         upcoming = player.queue[0]
         vc.stop()  # la callback `after` avvia la prossima traccia
         await interaction.response.send_message(
-            f"⏭️ Ora in riproduzione: **{upcoming.title}** di **{upcoming.author}**"
+            f"⏭️ Ora in riproduzione: **{fmt(upcoming.title)}** di **{fmt(upcoming.author)}**"
         )
         return True
 

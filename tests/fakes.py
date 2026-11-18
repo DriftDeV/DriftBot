@@ -84,6 +84,7 @@ class FakeInteraction:
         self.user = SimpleNamespace(
             id=user_id,
             name=name,
+            display_name=name,
             mention=f"<@{user_id}>",
             voice=SimpleNamespace(channel=channel) if channel else None,
         )
@@ -91,6 +92,7 @@ class FakeInteraction:
             channel.members.append(self.user)
         self.sent = []
         self._done = False
+        self.deferred = False       # defer() chiamato (dopo un defer pubblico `ephemeral` viene ignorato da Discord)
         self.command = None
         self.response = SimpleNamespace(
             send_message=self._send_first,
@@ -101,6 +103,7 @@ class FakeInteraction:
         self.followup = SimpleNamespace(send=self._send)
         self.followup_error = None  # se impostato, followup.send solleva questa eccezione
         self.edits = []             # chiamate a edit_original_response
+        self.message_edits = []     # chiamate a response.edit_message (click su un pulsante)
         self.edit_error = None      # se impostato, edit_original_response solleva questa eccezione
 
     async def edit_original_response(self, **kwargs):
@@ -114,9 +117,11 @@ class FakeInteraction:
 
     async def _defer(self, **kwargs):
         self._done = True
+        self.deferred = True
 
     async def _edit(self, **kwargs):
         self._done = True
+        self.message_edits.append(kwargs)
 
     async def _send(self, content=None, **kwargs):
         if self.followup_error is not None:

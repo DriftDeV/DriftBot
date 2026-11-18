@@ -218,3 +218,37 @@ class FakeAnthropic:
             "content": content, "stop_reason": self.stop_reason, "stop_sequence": None,
             "usage": {"input_tokens": 10, "output_tokens": 20},
         })
+
+
+class FakePolly:
+    """
+    Amazon Polly finto: POST /v1/speech (REST/JSON come l'API vera). Registra header e body di ogni richiesta;
+    gli errori hanno il formato vero (status HTTP + header `x-amzn-ErrorType` + body {"message": ...}).
+    """
+
+    def __init__(self):
+        self.audio = b"ID3" + bytes(range(256)) * 8        # finto MP3: basta per i test di rete
+        self.error = None                                  # (status, codice, messaggio)
+        self.delay = 0.0
+        self.empty = False
+        self.requests = []
+
+    def app(self):
+        app = web.Application()
+        app.router.add_post("/v1/speech", self.speech)
+        return app
+
+    async def speech(self, request):
+        import asyncio
+        body = await request.json()
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        self.requests.append({"headers": headers, "body": body})
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error:
+            status, code, message = self.error
+            return web.json_response({"message": message}, status=status, headers={"x-amzn-ErrorType": code})
+        return web.Response(
+            body=b"" if self.empty else self.audio, content_type="audio/mpeg",
+            headers={"x-amzn-RequestCharacters": str(len(body.get("Text", "")))},
+        )
