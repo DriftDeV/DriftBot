@@ -166,6 +166,15 @@ Se la VRAM non basta per separare la voce, `/ai-cover` ripiega automaticamente s
 
 ---
 
+## Creare il bot su Discord
+
+1. Nel [Discord Developer Portal](https://discord.com/developers/applications) crea una **New Application**, poi vai in **Bot** e copia il token nel file `.env` come `DISCORD_TOKEN`.
+2. Sempre in **Bot → Privileged Gateway Intents** attiva **Message Content Intent**: il bot lo richiede all'avvio e, se non è attivo anche nel portale, parte con un errore che lo ricorda.
+3. In **OAuth2 → URL Generator** scegli gli scope `bot` e `applications.commands` e questi permessi: *View Channels*, *Send Messages*, *Embed Links*, *Attach Files* (serve a `/ace-step` per allegare il brano), *Connect* e *Speak* (voce).
+4. Apri l'URL generato per aggiungere il bot al tuo server. I comandi slash vengono sincronizzati all'avvio.
+
+---
+
 ## In 3 passi (super semplice)
 1. Scarica il progetto:
 ```bash
@@ -179,10 +188,12 @@ python3.10 -m venv venv
 source venv/bin/activate
 make install GPU=rocm   # oppure GPU=cuda / GPU=cpu / niente per il rilevamento automatico
 ```
-- Windows (PowerShell):
+- Windows (PowerShell **come amministratore**):
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\setup-windows.ps1
+.\setup-windows.ps1              # installa Chocolatey, Visual C++ build tools, Python 3.10, FFmpeg, Make e Git
+.\setup-windows.ps1 -Dev         # con gli strumenti di sviluppo
+.\setup-windows.ps1 -Gpu cpu     # forza la CPU (o -Gpu cuda; ROCm è solo Linux)
 ```
 3. Metti il token di Discord in un file `.env` nella cartella principale:
 ```env
@@ -314,15 +325,19 @@ Regole pratiche:
 ---
 
 ## Risoluzione rapida problemi
-- "Module not found" → attiva il venv e reinstalla: `pip install -r requirements.txt`
+- "Module not found" → attiva il venv e reinstalla: `make install` (oppure `pip install -e .`)
 - "ffmpeg not found" → installa ffmpeg (vedi sopra)
 - Controlla la versione Python: `python --version` (consigliato 3.10+)
 
 ---
 
 ## Comandi utili per sviluppatori
-- Creare venv: `make venv` (se Makefile presente)
-- Installare dipendenze: `make install` o `pip install -r requirements.txt`
-- Eseguire bot: `make run` o `python src/main.py`
+- `make help`: elenco dei comandi
+- `make install` / `make install-dev`: installa (e crea il venv se serve); `GPU=cuda|rocm|cpu` sceglie la build di PyTorch
+- `make run` (oppure `python src/main.py`): avvia il bot
+- `make test`: esegue i test con la copertura (servono le dipendenze di sviluppo: `make install-dev`)
+- `make lint`, `make format`, `make type-check`, `make pre-commit`: controlli di qualità del codice
+- `make test-py`: verifica che PyTorch veda la GPU
+- `make update`: aggiorna le dipendenze
 
 ---
