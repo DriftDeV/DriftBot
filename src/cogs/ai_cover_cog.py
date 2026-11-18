@@ -158,6 +158,11 @@ class AICover(commands.Cog):
 
     @app_commands.command(name="skip", description="Salta la canzone attualmente in riproduzione")
     async def skip(self, interaction: discord.Interaction):
+            # Se sta suonando musica (cog Music) salta quella traccia
+            music = self.bot.get_cog("Music")
+            if music is not None and await music.skip_if_active(interaction):
+                return
+
             vc = interaction.guild.voice_client
 
             # 1. Controlla se il bot è connesso e sta riproducendo qualcosa
