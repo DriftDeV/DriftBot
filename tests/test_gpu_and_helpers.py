@@ -243,3 +243,103 @@ def test_bot_blocks_mass_mentions(main_module):
     bot = main_module.MyBot()
     mentions = bot.allowed_mentions
     assert mentions.everyone is False and mentions.roles is False and mentions.users is True
+
+
+# ------------------------------------------------------------- database nel bot
+
+async def test_setup_hook_opens_the_database_and_imports_old_json_before_loading_cogs(main_module, isolated_data, tmp_path, monkeypatch):
+    import cogs
+    import storage
+    from audio_samples import wav_bytes, write
+
+    write(cogs.BASE_DATA_DIR / "7" / "soundboard" / "clap.wav", wav_bytes())
+    (cogs.BASE_DATA_DIR / "7" / "soundboard" / "index.json").write_text('{"Clap": "clap.wav"}')
+    monkeypatch.setattr(main_module, "COGS_DIR", tmp_path)          # nessun cog da caricare
+
+    bot = main_module.MyBot()
+    assert bot.db is None
+    seen_at_cog_load = []
+
+    async def fake_load(name):
+        seen_at_cog_load.append(bot.db is not None)                 # il db esiste già quando i cog si caricano
+
+    (tmp_path / "cog_a.py").write_text("")
+    monkeypatch.setattr(bot, "load_extension", fake_load)
+
+    async def fake_sync():
+        return []
+
+    monkeypatch.setattr(bot.tree, "sync", fake_sync)
+    await bot.setup_hook()
+    assert seen_at_cog_load == [True]
+    assert [s["name"] for s in await storage.list_sounds(bot.db, 7)] == ["Clap"]       # import dei vecchi JSON
+    assert (cogs.BASE_DATA_DIR / "7" / "soundboard" / "index.json.migrated").exists()
+
+    db = bot.db
+    await bot.close()
+    from database import DatabaseClosed
+    with pytest.raises(DatabaseClosed):                             # chiuso insieme al bot
+        await db.fetchall("SELECT 1")
+
+
+async def test_a_failing_legacy_import_does_not_stop_the_bot(main_module, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(main_module, "COGS_DIR", tmp_path)
+
+    async def boom(db):
+        raise RuntimeError("import rotto")
+
+    monkeypatch.setattr(main_module.legacy_import, "import_legacy_json", boom)
+    bot = main_module.MyBot()
+
+    async def fake_sync():
+        return []
+
+    monkeypatch.setattr(bot.tree, "sync", fake_sync)
+    await bot.setup_hook()                                          # non solleva
+    assert bot.db is not None and "Import dei vecchi file JSON fallito" in caplog.text
+    await bot.close()
+
+
+async def test_guild_cache_follows_joins_updates_and_leaves(main_module):
+    import storage
+    from types import SimpleNamespace
+
+    bot = main_module.MyBot()
+    bot.db = await main_module.Database.open(storage.default_db_path())
+
+    def guild(gid, name, icon=None, members=3):
+        return SimpleNamespace(id=gid, name=name, icon=SimpleNamespace(url=icon) if icon else None, member_count=members)
+
+    g1, g2 = guild(1, "Casa", "https://cdn.discordapp.com/i.png"), guild(2, "Ufficio")
+    bot._connection._guilds = {g.id: g for g in (g1, g2)}               # elenco dei server noto al bot
+    await bot.sync_guild_cache()
+    guilds = {g["id"]: g for g in await storage.list_guilds(bot.db)}
+    assert guilds[1]["name"] == "Casa" and guilds[1]["icon_url"].startswith("https://cdn.discordapp.com/")
+    assert guilds[2]["present"] == 1
+
+    await bot.on_guild_remove(g2)
+    assert {g["id"]: g["present"] for g in await storage.list_guilds(bot.db)} == {1: 1, 2: 0}
+
+    renamed = guild(1, "Casa nuova", None)
+    bot._connection._guilds = {1: renamed}
+    await bot.on_guild_update(g1, renamed)
+    assert {g["id"]: g["name"] for g in await storage.list_guilds(bot.db)}[1] == "Casa nuova"
+    before = bot.db.stats()["writes_done"]
+    await bot.on_guild_update(renamed, renamed)                         # niente è cambiato: nessuna scrittura
+    assert bot.db.stats()["writes_done"] == before
+    await bot.close()
+
+
+async def test_database_errors_at_startup_exit_with_a_clear_message(main_module, monkeypatch):
+    from database import DatabaseError
+
+    monkeypatch.setattr(main_module, "TOKEN", "token-di-prova")
+    monkeypatch.setattr(main_module.discord.utils, "setup_logging", lambda **kwargs: None)
+
+    def fake_run(coroutine):
+        coroutine.close()
+        raise DatabaseError("versione più recente")
+
+    monkeypatch.setattr(main_module.asyncio, "run", fake_run)
+    with pytest.raises(SystemExit, match="Database non utilizzabile: versione più recente"):
+        main_module.run()

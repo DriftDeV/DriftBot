@@ -29,6 +29,7 @@ from database import Database
 log = logging.getLogger(__name__)
 
 MIGRATED_SUFFIX = ".migrated"
+LEGACY_RVC_INDEX = Path(cogs.__file__).parent / "RVC" / "index.json"
 
 
 def _read_mapping(path: Path) -> Optional[dict]:
@@ -169,7 +170,7 @@ async def import_legacy_json(
     """Importa i vecchi JSON. Restituisce quanti elementi sono stati importati e quali saltati."""
     data_dir = Path(data_dir) if data_dir else Path(cogs.BASE_DATA_DIR)
     models_dir = Path(models_dir) if models_dir else storage.rvc_models_dir()
-    rvc_index = Path(rvc_index) if rvc_index else Path(cogs.__file__).parent / "RVC" / "index.json"
+    rvc_index = Path(rvc_index) if rvc_index else Path(LEGACY_RVC_INDEX)
 
     found = await asyncio.to_thread(_collect, data_dir, models_dir, rvc_index)
     done = await db.write(_insert, found)

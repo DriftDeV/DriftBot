@@ -369,20 +369,26 @@ async def rename_sound(db: Database, sound_id: Any, name: Any, *, actor: str = "
     return await get_sound(db, number)  # type: ignore[return-value]
 
 
-async def move_sound(db: Database, sound_id: Any, guild_id: int, *, actor: str = "bot") -> dict:
-    """Sposta un suono in un altro server oppure lo rende globale (guild_id = 0)."""
+async def move_sound(
+    db: Database, sound_id: Any, guild_id: int, *, name: Any = None, actor: str = "bot"
+) -> dict:
+    """
+    Sposta un suono in un altro server oppure lo rende globale (guild_id = 0), con la possibilità di
+    rinominarlo nello stesso passaggio (il controllo dei nomi doppi vale per la combinazione finale).
+    """
     row = await get_sound(db, sound_id)
     if row is None:
         raise NotFound("Suono non trovato.")
+    new_name = clean_name(name, "Il nome del suono") if name is not None else row["name"]
     if row["guild_id"] == int(guild_id):
-        return row
+        return row if new_name == row["name"] else await rename_sound(db, row["id"], new_name, actor=actor)
     src, dest = sounds_dir(row["guild_id"]) / row["filename"], sounds_dir(guild_id) / row["filename"]
     if not safe_file(sounds_dir(row["guild_id"]), row["filename"]):
         raise NotFound("Il file del suono non esiste più sul disco.")
     await asyncio.to_thread(_move, src, dest)
 
     def run(conn: sqlite3.Connection) -> None:
-        conn.execute("UPDATE sounds SET guild_id = ? WHERE id = ?", (int(guild_id), row["id"]))
+        conn.execute("UPDATE sounds SET guild_id = ?, name = ? WHERE id = ?", (int(guild_id), new_name, row["id"]))
         _audit(conn, actor, "sound.move", f"{row['name']} → {'globale' if guild_id == GLOBAL else f'server {guild_id}'}")
 
     try:
@@ -390,7 +396,7 @@ async def move_sound(db: Database, sound_id: Any, guild_id: int, *, actor: str =
     except BaseException as e:
         await asyncio.to_thread(_move, dest, src)       # annulla lo spostamento del file
         if isinstance(e, sqlite3.IntegrityError) and _is_unique_violation(e):
-            raise Duplicate(f"La destinazione ha già un suono chiamato «{row['name']}».") from e
+            raise Duplicate(f"La destinazione ha già un suono chiamato «{new_name}».") from e
         raise
     return await get_sound(db, row["id"])  # type: ignore[return-value]
 
