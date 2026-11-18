@@ -9,6 +9,10 @@ from discord import app_commands
 from discord.ext import voice_recv
 from cogs import escape_md, get_guild_dir, get_guild_json, load_json, save_json
 import logging
+try:
+    import davey
+except ImportError:  # senza davey discord.py non si connette comunque
+    davey = None
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +25,37 @@ MAX_RECORD_SECONDS = 180      # la registrazione si ferma da sola, così non cre
 MIN_RECORD_SECONDS = 3        # sotto questa durata il campione è inutilizzabile per il voice cloning
 BYTES_PER_SECOND = 48000 * 2 * 2   # 48kHz, 16 bit, stereo
 MAX_NAME_LENGTH = 40          # il nome file finisce in un Choice (max 100 caratteri)
+
+
+OPUS_SILENCE = b"\xf8\xff\xfe"
+
+
+def enable_dave_decrypt(vc: "voice_recv.VoiceRecvClient") -> None:
+    """
+    voice_recv 0.5.2a toglie solo la cifratura di trasporto: con DAVE (E2EE di Discord) il payload
+    resta cifrato, Opus risponde "corrupted stream" e il router muore (0 secondi registrati).
+    Qui si aggiunge la decifratura DAVE dopo quella di trasporto.
+    """
+    if davey is None:
+        return
+    decryptor = vc._reader.decryptor
+    transport_decrypt = decryptor.decrypt_rtp
+
+    def decrypt_rtp(packet):
+        data = transport_decrypt(packet)
+        session = vc._connection.dave_session
+        user_id = vc._ssrc_to_id.get(packet.ssrc)
+        if session is None or not session.ready or user_id is None:
+            return data
+        if data == OPUS_SILENCE:  # i frame di silenzio viaggiano in chiaro
+            return data
+        try:
+            return session.decrypt(user_id, davey.MediaType.audio, data)
+        except Exception as e:
+            log.debug("Decifratura DAVE fallita (user %s): %s", user_id, e)
+            return OPUS_SILENCE
+
+    decryptor.decrypt_rtp = decrypt_rtp
 
 
 class UserSpecificSink(voice_recv.AudioSink):
@@ -345,6 +380,7 @@ class Create_Speaker(commands.Cog):
         try:
             sink = UserSpecificSink(str(filename), target_user)
             vc.listen(sink)
+            enable_dave_decrypt(vc)
         except Exception as e:
             log.error("Impossibile avviare la registrazione: %s", e)
             if sink is not None:

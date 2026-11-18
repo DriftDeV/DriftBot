@@ -37,12 +37,19 @@ YDL_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
+    "js_runtimes": {"node": {}},   # YouTube richiede un runtime JS per le sfide (nodejs)
 }
 
 FFMPEG_OPTS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options": "-vn",
 }
+
+
+def ffmpeg_opts(track: "Track") -> dict:
+    headers = "".join(f"{k}: {v}\r\n" for k, v in track.headers.items())
+    before = FFMPEG_OPTS["before_options"] + (f' -headers "{headers}"' if headers else "")
+    return {**FFMPEG_OPTS, "before_options": before}
 
 
 class NoMatches(Exception):
@@ -61,6 +68,7 @@ class Track:
     author: str
     webpage_url: str
     stream_url: str
+    headers: dict = field(default_factory=dict)   # quelli che yt-dlp usa per lo stream: senza, 403
     resolved_at: float = field(default_factory=time.monotonic)
 
     def is_stale(self) -> bool:
@@ -86,6 +94,7 @@ def extract_track(query: str) -> Track:
         author=info.get("uploader") or info.get("channel") or "Sconosciuto",
         webpage_url=info.get("webpage_url") or info.get("original_url") or target,
         stream_url=info["url"],
+        headers=info.get("http_headers") or {},
     )
 
 
@@ -199,9 +208,9 @@ class Music(commands.Cog):
                 try:
                     if track.is_stale():
                         fresh = await asyncio.to_thread(extract_track, track.webpage_url)
-                        track.stream_url, track.resolved_at = fresh.stream_url, fresh.resolved_at
+                        track.stream_url, track.headers, track.resolved_at = fresh.stream_url, fresh.headers, fresh.resolved_at
                     source = discord.PCMVolumeTransformer(
-                        discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTS),
+                        discord.FFmpegPCMAudio(track.stream_url, **ffmpeg_opts(track)),
                         volume=player.volume / 100,
                     )
                     vc.play(source, after=lambda err, g=guild: self._after(g, err))
