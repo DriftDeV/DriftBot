@@ -38,6 +38,8 @@ YDL_OPTS = {
     "no_warnings": True,
     "skip_download": True,
     "js_runtimes": {"node": {}},   # YouTube richiede un runtime JS per le sfide (nodejs)
+    # il client "tv" (scelto di default da yt-dlp 2026.10) dà URL che googlevideo rifiuta con 403
+    "extractor_args": {"youtube": {"player_client": ["visionos"]}},
 }
 
 FFMPEG_OPTS = {
