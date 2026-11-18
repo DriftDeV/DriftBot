@@ -41,7 +41,7 @@ async def actions(st):
 
 def test_sniff_audio_recognises_content_not_extension(tmp_path):
     for kind, data in (("wav", wav_bytes()), ("mp3", MP3), ("ogg", OGG), ("flac", FLAC), ("m4a", M4A)):
-        assert storage.sniff_audio(write(tmp_path / f"x.bin", data)) == kind
+        assert storage.sniff_audio(write(tmp_path / "x.bin", data)) == kind
     for bad in (b"", b"MZ\x90\x00 exe", b"<html>", b"#!/bin/sh\n", b"PK\x03\x04 zip"):
         assert storage.sniff_audio(write(tmp_path / "bad.wav", bad)) is None     # .wav ma non audio
     assert storage.sniff_audio(tmp_path / "inesistente") is None
@@ -172,10 +172,12 @@ async def test_delete_sound_removes_row_and_file(st):
 
 
 async def test_a_poisoned_filename_in_the_database_can_never_delete_outside_the_folder(st):
-    secret = write(st.tmp / "data" / "secret.txt", b"x")
+    secret = write(st.tmp / "data" / "secret.txt", b"x")          # data/7/soundboard/../../secret.txt
+    await storage.add_sound(st.db, 7, "legittimo", upload(st, wav_bytes()))      # la cartella esiste: `..` si può attraversare
     await st.db.execute(
-        "INSERT INTO sounds (guild_id, name, filename, created_at) VALUES (7, 'evil', '../../data/secret.txt', 0)")
-    row = (await storage.list_sounds(st.db, 7))[0]
+        "INSERT INTO sounds (guild_id, name, filename, created_at) VALUES (7, 'evil', '../../secret.txt', 0)")
+    assert (storage.sounds_dir(7) / "../../secret.txt").resolve() == secret.resolve()     # il percorso punta davvero lì
+    row = next(r for r in await storage.list_sounds(st.db, 7) if r["name"] == "evil")
     assert row["missing"] is True and storage.sound_file(row) is None            # non lo riconosce nemmeno
     assert await storage.resolve_sound(st.db, 7, row["id"]) is None
     await storage.delete_sound(st.db, row["id"])

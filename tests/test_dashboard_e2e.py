@@ -342,6 +342,8 @@ def test_keyboard_and_screen_reader_basics(app):
 
     # il link "Vai al contenuto" è il primo elemento raggiungibile con Tab
     page.goto(app.live.url)
+    expect(page.locator("#app-view")).to_be_visible()               # sessione ripristinata, app già caricata
+    assert page.evaluate("document.activeElement.id") != "main"      # ricaricando non si ruba il focus
     page.keyboard.press("Tab")
     expect(page.get_by_role("link", name="Vai al contenuto")).to_be_focused()
 
