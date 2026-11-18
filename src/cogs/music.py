@@ -118,6 +118,15 @@ class Music(commands.Cog):
         if player and player.idle_task:
             player.idle_task.cancel()
 
+    @staticmethod
+    def _music_active(vc: Optional[discord.VoiceClient], player: GuildPlayer) -> bool:
+        """
+        True se il voice client sta davvero suonando (o è in pausa su) una traccia di questo cog.
+        Altri cog (AI cover, TTS, soundboard) possono prendere il voice client a metà coda:
+        in quel caso `player.current` resta valorizzato ma `vc.source` non è più il nostro.
+        """
+        return vc is not None and player.current is not None and vc.source is player.source
+
     def _cancel_idle(self, player: GuildPlayer) -> None:
         if player.idle_task:
             player.idle_task.cancel()
@@ -212,12 +221,13 @@ class Music(commands.Cog):
         vc = guild.voice_client
 
         if vc is not None:
-            if player.current is None and (vc.is_playing() or vc.is_paused()):
+            music_active = self._music_active(vc, player)
+            if not music_active and (vc.is_playing() or vc.is_paused()):
                 return await interaction.response.send_message(
                     "❌ Sto già riproducendo altro audio (TTS, soundboard o AI cover).",
                     ephemeral=True,
                 )
-            if player.current is not None and vc.channel != user_voice.channel:
+            if music_active and vc.channel != user_voice.channel:
                 return await interaction.response.send_message(
                     "❌ Sto già suonando in un altro canale vocale.", ephemeral=True
                 )
@@ -244,7 +254,7 @@ class Music(commands.Cog):
             return await interaction.followup.send("❌ Non riesco a connettermi al canale vocale.")
 
         self._cancel_idle(player)
-        starting = player.current is None
+        starting = not self._music_active(vc, player)
         player.queue.append(track)
         await self._play_next(guild)
 
@@ -321,7 +331,7 @@ class Music(commands.Cog):
         senza toccare l'interazione.
         """
         player = self.players.get(interaction.guild.id)
-        if player is None or player.current is None:
+        if player is None or not self._music_active(interaction.guild.voice_client, player):
             return False
 
         vc = await self._active_vc(interaction)

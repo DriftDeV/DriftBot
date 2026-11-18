@@ -153,3 +153,6 @@ env/
 *.wav
 *.mp3
 src/cogs/RVC/*/temp/
+
+# File temporanei delle AI cover
+src/cogs/RVC/jobs/

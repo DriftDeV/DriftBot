@@ -27,6 +27,7 @@ class FakeVC:
         self.paused = False
         self.connected = True
         self.after = None
+        self.source = None
 
     def is_connected(self):
         return self.connected
@@ -38,7 +39,7 @@ class FakeVC:
         return self.paused
 
     def play(self, source, after=None):
-        self.playing, self.paused, self.after = True, False, after
+        self.playing, self.paused, self.after, self.source = True, False, after, source
 
     def pause(self):
         self.paused = True
@@ -49,6 +50,7 @@ class FakeVC:
     def stop(self):
         was_playing = self.playing
         self.playing = self.paused = False
+        self.source = None
         if was_playing and self.after:
             self.after(None)  # discord.py chiama `after` anche su stop()
 
@@ -306,6 +308,7 @@ async def test_controls_without_music(env):
 async def test_play_refuses_when_other_audio_is_playing(env):
     vc = await env.channel.connect()
     vc.playing = True  # es. TTS / soundboard
+    vc.source = object()
     it = await play(env)
     assert "altro audio" in it.last
     assert not env.cog.players[1].queue
@@ -348,3 +351,29 @@ async def test_bot_disconnect_cleans_state(env):
         bot_member, SimpleNamespace(channel=env.channel), SimpleNamespace(channel=None)
     )
     assert 1 not in env.cog.players
+
+
+async def test_other_cog_preempting_voice_client(env):
+    """AI cover / TTS / soundboard prendono il voice client a metà coda."""
+    await play(env)
+    await play(env)  # coda: t2
+    vc = env.guild.voice_client
+
+    vc.play(FakeSource("ai-cover"))  # un altro cog sostituisce la sorgente (nessun `after` nostro)
+
+    # /skip non è più nostro: deve lasciarlo all'AI cover senza toccare l'interazione
+    it = FakeInteraction(env.guild, env.channel)
+    assert await env.cog.skip_if_active(it) is False
+    assert it.sent == []
+
+    # /play mentre l'altro audio suona viene rifiutato, non accodato nel vuoto
+    it = await play(env)
+    assert "altro audio" in it.last
+
+    # finito l'altro audio, /play riparte dalla coda invece di restare bloccato
+    vc.stop()
+    await settle()
+    vc.playing, vc.source = False, None
+    it = await play(env)
+    assert "Track caricata" in it.last
+    assert env.cog.players[1].current is not None and vc.playing

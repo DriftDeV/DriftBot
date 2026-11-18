@@ -1,4 +1,4 @@
-.PHONY: help install install-dev venv clean run lint format type-check test pre-commit update
+.PHONY: help install install-torch install-dev venv clean run lint format type-check test pre-commit update
 
 PYTHON := python3.10
 VENV := venv
@@ -18,6 +18,39 @@ endif
 # Helper function to check if venv is active or create it
 CHECK_VENV = if [ "$(VENV_ACTIVE)" = "1" ]; then echo "Using active venv"; else $(MAKE) venv; fi
 
+# pip del venv attivo oppure di quello locale
+PIP := $(if $(filter 1,$(VENV_ACTIVE)),pip,$(BIN)/pip)
+
+# --- GPU -------------------------------------------------------------------
+# make install GPU=cuda   -> NVIDIA (CUDA)
+# make install GPU=rocm   -> AMD (ROCm, solo Linux)
+# make install GPU=cpu    -> senza GPU
+# Default (auto): nvidia-smi presente = cuda, /dev/kfd presente = rocm, altrimenti cpu.
+# PyTorch va installato dall'indice giusto PRIMA delle altre dipendenze: su PyPI (Linux)
+# c'e' solo la build CUDA e su una macchina AMD ripiegherebbe silenziosamente sulla CPU.
+GPU ?= auto
+ifeq ($(GPU),auto)
+ifeq ($(OS),Windows_NT)
+    GPU_KIND := cuda
+else ifneq ($(shell command -v nvidia-smi 2>/dev/null),)
+    GPU_KIND := cuda
+else ifneq ($(wildcard /dev/kfd),)
+    GPU_KIND := rocm
+else
+    GPU_KIND := cpu
+endif
+else
+    GPU_KIND := $(GPU)
+endif
+
+# Versioni richieste da chatterbox-tts (torch==2.6.0). Cambia l'indice se usi un'altra versione ROCm/CUDA.
+TORCH_VERSION := 2.6.0
+TORCHVISION_VERSION := 0.21.0
+TORCH_INDEX_cuda := https://download.pytorch.org/whl/cu124
+TORCH_INDEX_rocm := https://download.pytorch.org/whl/rocm6.2.4
+TORCH_INDEX_cpu  := https://download.pytorch.org/whl/cpu
+TORCH_INDEX ?= $(TORCH_INDEX_$(GPU_KIND))
+
 help:
 	@echo "❓ Discord Python bot makefile Helper ❓"
 	@echo ""
@@ -26,13 +59,29 @@ help:
 	@echo "make install-dev   > Create Python virtual environment and installs"
 	@echo "                     dependencies"
 	@echo "make run           > Runs the bot!"
+	@echo "make install GPU=cuda|rocm|cpu"
+	@echo "                   > Scegli NVIDIA (CUDA), AMD (ROCm) o CPU (default: auto)"
+	@echo "make install-torch > Installa solo PyTorch per la GPU scelta"
+	@echo "make test-py       > Verifica che PyTorch veda la GPU"
 
 venv:
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install "pip<24.1"
+	$(MAKE) install-torch
 	$(BIN)/pip install "omegaconf==2.0.6" "hydra-core==1.0.7"
 	$(BIN)/pip install "fairseq==0.12.2"
 	$(BIN)/pip install "numpy>=1.23.5,<2.0.0" "librosa==0.9.2" "scipy==1.11.4"
+
+install-torch:
+ifeq ($(GPU_KIND),rocm)
+	@echo "🔴 Installo PyTorch per AMD ROCm ($(TORCH_INDEX))"
+	@echo "   Serve il driver amdgpu e l'utente nei gruppi 'render' e 'video'."
+else ifeq ($(GPU_KIND),cuda)
+	@echo "🟢 Installo PyTorch per NVIDIA CUDA ($(TORCH_INDEX))"
+else
+	@echo "⚪ Installo PyTorch per CPU ($(TORCH_INDEX))"
+endif
+	$(PIP) install torch==$(TORCH_VERSION) torchaudio==$(TORCH_VERSION) torchvision==$(TORCHVISION_VERSION) --index-url $(TORCH_INDEX)
 
 install-brew:
 	@echo "👀 -> Controllo presenza Homebrew..."
@@ -138,15 +187,7 @@ install:
 	fi
 ifeq ($(VENV_ACTIVE),1)
 	@echo "✅ Virtual environment is already active"
-	pip install -e .
-else
-	@echo "📦 Creating virtual environment..."
-	$(MAKE) venv
-	$(BIN)/pip install -e .
-endif
-
-ifeq ($(VENV_ACTIVE),1)
-	@echo "✅ Virtual environment is already active"
+	$(MAKE) install-torch
 	pip install -e .
 else
 	@echo "📦 Creating virtual environment..."
@@ -163,6 +204,7 @@ install-dev:
 ifeq ($(VENV_ACTIVE),1)
 	@echo "✅ Virtual environment is already active"
 	pip install --upgrade pip setuptools wheel
+	$(MAKE) install-torch
 	pip install "numpy>=1.24.0,<2.0.0" "Cython>=0.29.32"
 	# Installiamo pkuseg senza isolamento così vede numpy nel venv
 	pip install pkuseg==0.0.25 --no-build-isolation
