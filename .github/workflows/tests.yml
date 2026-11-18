@@ -1,0 +1,60 @@
+name: Tests
+
+# Esegue lint e test ad ogni push (su qualsiasi branch) e su ogni pull request.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:   # permette di lanciarlo a mano dalla scheda Actions
+
+# Se arriva un nuovo push sullo stesso branch, annulla l'esecuzione ancora in corso.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (errori reali)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installa ruff
+        run: pip install ruff
+      # Solo errori che rompono il bot a runtime: sintassi, nomi non definiti, ridefinizioni,
+      # confronti/format sbagliati. Niente stile né import inutilizzati.
+      - name: Controllo errori (sintassi, nomi non definiti, ridefinizioni)
+        run: ruff check src tests --select E9,F63,F7,F811,F821
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 è la versione minima del progetto (requires-python >= 3.10)
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Installa le dipendenze dei test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+
+      # Gira senza GPU: torch, rvc-python, chatterbox ecc. sono sostituiti da moduli finti
+      # (vedi tests/conftest.py), quindi i test sono veloci e non scaricano modelli.
+      - name: Esegui i test
+        run: python -m pytest -v --tb=short -p no:cacheprovider
