@@ -127,7 +127,7 @@ async def main():
     async with bot:
         await bot.start(TOKEN)
 
-if __name__ == '__main__':
+def run() -> None:
     discord.utils.setup_logging(level=logging.INFO)
     if not TOKEN:
         sys.exit("❌ DISCORD_TOKEN mancante: crea un file .env con DISCORD_TOKEN=il_tuo_token")
@@ -138,3 +138,13 @@ if __name__ == '__main__':
         pass
     except discord.LoginFailure:
         sys.exit("❌ Token Discord non valido: controlla DISCORD_TOKEN nel file .env")
+    except discord.PrivilegedIntentsRequired:
+        # Il bot chiede Message Content Intent (vedi `intents` sopra): va attivato anche nel portale
+        sys.exit(
+            "❌ Intent privilegiato non abilitato: nel Discord Developer Portal apri la tua applicazione, "
+            "vai in Bot > Privileged Gateway Intents e attiva «Message Content Intent» (vedi README)."
+        )
+
+
+if __name__ == '__main__':
+    run()
