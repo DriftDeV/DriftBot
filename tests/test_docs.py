@@ -4,10 +4,14 @@ comandi che non esistono sono un difetto vero (es. il README citava `setup-windo
 """
 
 import re
-import tomllib
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib                    # Python 3.11+
+except ModuleNotFoundError:           # Python 3.10 (versione minima del progetto): serve `tomli`
+    import tomli as tomllib
 
 import main
 
