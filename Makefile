@@ -138,34 +138,28 @@ mac-deps:
 	else \
 		echo "✅ -> ffmpeg già installato"; \
 	fi
-	@if ! command -v espeak-ng >/dev/null 2>&1; then \
-		echo "🔄 -> Installo espeak-ng per MacOS (voce robotica di /parla)... "; \
-		brew install espeak-ng; \
-	else \
-		echo "✅ -> espeak-ng già installato"; \
-	fi
 
 install-deps-linux:
 	@echo "🐧 Rilevamento distribuzione Linux..."
 	@if command -v apt-get >/dev/null 2>&1; then \
 		echo "📦 Rilevato Debian/Ubuntu/Mint"; \
 		sudo apt-get update; \
-		sudo apt-get install -y python3.11 python3.11-venv python3-pip ffmpeg espeak-ng; \
+		sudo apt-get install -y python3.11 python3.11-venv python3-pip ffmpeg; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		echo "📦 Rilevato Fedora/RHEL/CentOS"; \
-		sudo dnf install -y python3.10 python3-pip ffmpeg espeak-ng; \
+		sudo dnf install -y python3.10 python3-pip ffmpeg; \
 	elif command -v pacman >/dev/null 2>&1; then \
 		echo "📦 Rilevato Arch Linux/Manjaro"; \
-		sudo pacman -S --noconfirm python3.11 python-pip ffmpeg espeak-ng; \
+		sudo pacman -S --noconfirm python3.11 python-pip ffmpeg; \
 	elif command -v zypper >/dev/null 2>&1; then \
 		echo "📦 Rilevato OpenSUSE"; \
-		sudo zypper install -y python311 python311-pip ffmpeg espeak-ng; \
+		sudo zypper install -y python311 python311-pip ffmpeg; \
 	elif command -v apk >/dev/null 2>&1; then \
 		echo "📦 Rilevato Alpine Linux"; \
-		sudo apk add python3 py3-pip ffmpeg espeak-ng; \
+		sudo apk add python3 py3-pip ffmpeg; \
 	else \
 		echo "❌ Distribuzione non riconosciuta automaticamente."; \
-		echo "👉 Installa manualmente: Python 3.11, pip, FFmpeg ed espeak-ng."; \
+		echo "👉 Installa manualmente: Python 3.11, pip e FFmpeg."; \
 		exit 1; \
 	fi
 	@echo "✅ Dipendenze di sistema installate!"
@@ -173,7 +167,7 @@ install-deps-linux:
 install-deps:
 ifeq ($(OS),Windows_NT)
 	@echo "⚠️  Su Windows l'installazione automatica di sistema non è supportata."
-	@echo "👉 Assicurati di aver installato Python 3.11, FFmpeg ed eSpeak NG (winget install eSpeak-NG.eSpeak-NG)."
+	@echo "👉 Assicurati di aver installato Python 3.11 e FFmpeg manualmente."
 else
 ifeq ($(DETECTED_OS),Darwin)
 	@echo "🍎 Rilevato MacOS."

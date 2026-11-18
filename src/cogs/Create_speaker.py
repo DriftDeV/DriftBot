@@ -369,7 +369,7 @@ class Create_Speaker(commands.Cog):
             await self.save_speaker(interaction.guild_id, target_user.name, filename_only)
             return "ok", (
                 f"Speaker **{escape_md(target_user.name)}** salvato ({sink.seconds:.0f}s di audio). "
-                "Ora puoi sceglierlo con `/speak`."
+                "Ora puoi sceglierlo con `/tts-ai`."
             )
 
         # Pannello di registrazione. Niente percorsi del server: sono dettagli interni che non servono all'utente.

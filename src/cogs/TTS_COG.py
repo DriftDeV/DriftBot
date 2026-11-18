@@ -15,7 +15,7 @@ import gpu_utils
 from cogs import get_guild_dir, get_guild_json, load_json, resolve_in_dir
 
 # torch/torchaudio/chatterbox sono opzionali all'import: se mancano o non si caricano
-# (es. libreria GPU incompatibile) il cog si carica lo stesso e /speak risponde con un errore chiaro.
+# (es. libreria GPU incompatibile) il cog si carica lo stesso e /tts-ai risponde con un errore chiaro.
 try:
     import torch
     import torchaudio as ta
@@ -122,7 +122,7 @@ class TTSCog(commands.Cog):
         """Initialize the TTS model asynchronously."""
         self.log(f"[TORCH] {gpu_utils.describe()}", "INFO")
         if torch is None or ChatterboxMultilingualTTS is None:
-            self.log("Chatterbox/torch non disponibili: /speak disattivato", "ERROR")
+            self.log("Chatterbox/torch non disponibili: /tts-ai disattivato", "ERROR")
             return
 
         if self.device == "cpu" or self.device.startswith("mps"):
@@ -191,7 +191,7 @@ class TTSCog(commands.Cog):
             pass
 
     @app_commands.command(
-        name="speak",
+        name="tts-ai",
         description="Genera un audio dal testo clonando una voce con l'AI",
     )
     @app_commands.describe(

@@ -240,7 +240,7 @@ async def test_stop_button_turns_the_panel_into_the_saved_result(sp, monkeypatch
     final = pressed.edits[-1]
     assert final["view"] is None and final["embed"].title == "✅ Registrazione salvata"
     assert final["embed"].color == discord.Color.green() and "alice" in final["embed"].description
-    assert "/speak" in final["embed"].description and "in corso" not in final["embed"].title
+    assert "/tts-ai" in final["embed"].description and "in corso" not in final["embed"].title
 
     saved = json.loads((sp.dir / "index.json").read_text())
     assert list(saved) == ["alice"] and (sp.dir / saved["alice"]).exists()

@@ -54,11 +54,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r tests/requirements.txt
 
-      # eSpeak NG: permette ai test della voce robotica (/parla) di provare anche il motore VERO
-      # (lingue, voci, velocità, testi ostili). Senza, quei test vengono saltati.
-      - name: Installa eSpeak NG
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng
-
       # Gira senza GPU: torch, rvc-python, chatterbox ecc. sono sostituiti da moduli finti
       # (vedi tests/conftest.py), quindi i test sono veloci e non scaricano modelli.
       - name: Esegui i test
