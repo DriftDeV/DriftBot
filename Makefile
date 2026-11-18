@@ -1,4 +1,4 @@
-.PHONY: help install install-torch install-dev venv clean run lint format type-check test pre-commit update
+.PHONY: help install install-torch install-dev venv clean run dashboard lint format type-check test pre-commit update
 
 PYTHON := python3.10
 VENV := venv
@@ -59,6 +59,7 @@ help:
 	@echo "make install-dev   > Create Python virtual environment and installs"
 	@echo "                     dependencies"
 	@echo "make run           > Runs the bot!"
+	@echo "make dashboard     > Dashboard web in un processo separato dal bot"
 	@echo "make install GPU=cuda|rocm|cpu"
 	@echo "                   > Scegli NVIDIA (CUDA), AMD (ROCm) o CPU (default: auto)"
 	@echo "make install-torch > Installa solo PyTorch per la GPU scelta"
@@ -234,6 +235,14 @@ ifeq ($(VENV_ACTIVE),1)
 	python src/main.py
 else
 	$(BIN)/python src/main.py
+endif
+
+# Dashboard in un processo separato dal bot (richiede DASHBOARD_PASSWORD nel .env)
+dashboard:
+ifeq ($(VENV_ACTIVE),1)
+	python src/dashboard_main.py
+else
+	$(BIN)/python src/dashboard_main.py
 endif
 
 test-py:

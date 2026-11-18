@@ -7,7 +7,8 @@ from typing import Awaitable, Callable, Optional
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import voice_recv
-from cogs import escape_md, get_guild_dir, get_guild_json, load_json, save_json
+import storage
+from cogs import escape_md
 import logging
 try:
     import davey
@@ -228,24 +229,13 @@ class Create_Speaker(commands.Cog):
         print("✅ Create_Speaker caricato...")
 
 
-    async def save_speaker(self, guild_id : int, speaker_name : str, speaker_filename : str) :
-        speakers_json = await get_guild_json(guild_id, "speakers")
-        alias_json = await get_guild_json(guild_id, "speakers", json_name="alias.json")
-        speakers = load_json(speakers_json)
-        speaker_aliases = load_json(alias_json)
-
-        speaker_name = speaker_aliases.get(speaker_name, speaker_name)
-        speakers[speaker_name] = speaker_filename
-        save_json(speakers_json, speakers)
-
-    async def get_speaker_name(self, filename : str, guild_id : int) -> str :
-        speakers_json = await get_guild_json(guild_id, "speakers")
-        current_speakers = load_json(speakers_json)
-        speaker_found = ""
-        for speaker, value in current_speakers.items() :
-            if value == filename :
-                speaker_found = speaker
-        return speaker_found
+    async def save_speaker(self, guild_id : int, speaker_name : str, speaker_filename : str,
+                           duration : Optional[float] = None) -> dict :
+        """
+        Salva (nel database) la voce appena registrata. Se la stessa persona era già stata registrata
+        la sua voce viene sostituita, anche se nel frattempo è stata rinominata.
+        """
+        return await storage.save_recorded_voice(self.bot.db, guild_id, speaker_name, speaker_filename, duration)
 
     async def autocomplete_speakers(
             self,
@@ -253,15 +243,15 @@ class Create_Speaker(commands.Cog):
             current : str,
     ) -> list[app_commands.Choice[str]]:
         try:
-            speakers_json = await get_guild_json(interaction.guild_id, "speakers")
-            current_speakers = load_json(speakers_json)
+            voices = await storage.list_voices_for_guild(self.bot.db, interaction.guild_id)
         except Exception as e:
             log.warning("Autocomplete speakers fallito: %s", e)
             return []
 
-        return [app_commands.Choice(name=name[:100], value=filename[:100])
-            for name, filename in current_speakers.items()
-            if current.lower() in name.lower()][:25]
+        # Il valore è l'id nel database: non è un nome di file, quindi non può puntare fuori dalla cartella
+        return [app_commands.Choice(name=row["name"][:100], value=str(row["id"]))
+            for row in voices
+            if current.lower() in row["name"].lower()][:25]
 
 
     @app_commands.command(name="rename-speaker", description="Rinomina uno speaker")
@@ -277,29 +267,19 @@ class Create_Speaker(commands.Cog):
         if not new_name:
             return await interaction.response.send_message("❌ Il nome non può essere vuoto.", ephemeral=True)
 
-        # Ricavo il nome dello speaker
-        current_name = await self.get_speaker_name(speaker, interaction.guild_id)
-        if not current_name:
+        # Lo speaker deve esistere ed essere di questo server
+        voice = await storage.get_voice(self.bot.db, speaker)
+        if voice is None or voice["guild_id"] != interaction.guild_id:
             return await interaction.response.send_message("❌ Speaker non trovato.", ephemeral=True)
 
-        # Apro il file json degli speaker
-        speakers_json = await get_guild_json(interaction.guild_id, "speakers")
-        alias_json = await get_guild_json(interaction.guild_id, "speakers", json_name="alias.json")
-        current_speakers = load_json(speakers_json)
-        speaker_aliases = load_json(alias_json)
-
-        if new_name != current_name and new_name in current_speakers:
+        try:
+            await storage.rename_voice(self.bot.db, voice["id"], new_name, actor=f"discord:{interaction.user.id}")
+        except storage.Duplicate:
             return await interaction.response.send_message(
                 f"❌ Esiste già uno speaker chiamato `{new_name}`.", ephemeral=True
             )
-
-        current_speakers[new_name] = current_speakers.pop(current_name)
-        # Aggiorno gli alias
-        speaker_aliases[current_name] = new_name
-
-        # Scrivo i Dati
-        save_json(alias_json, speaker_aliases)
-        save_json(speakers_json, current_speakers)
+        except storage.StorageError as e:
+            return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
 
         await interaction.response.send_message("✅ Speaker Rinominato!")
 
@@ -351,7 +331,8 @@ class Create_Speaker(commands.Cog):
             except discord.HTTPException as e:
                 log.debug("Impossibile mostrare l'errore: %s", e)
 
-        SPEAKERS_DIR = await get_guild_dir(interaction.guild_id, "speakers")
+        SPEAKERS_DIR = storage.voices_dir(interaction.guild_id)
+        SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Gestione connessione vocale
         try:
@@ -402,9 +383,9 @@ class Create_Speaker(commands.Cog):
                     f"Registrazione troppo breve ({sink.seconds:.1f}s, minimo {MIN_RECORD_SECONDS}s): "
                     "nessuno speaker salvato."
                 )
-            await self.save_speaker(interaction.guild_id, target_user.name, filename_only)
+            saved = await self.save_speaker(interaction.guild_id, target_user.name, filename_only, sink.seconds)
             return "ok", (
-                f"Speaker **{escape_md(target_user.name)}** salvato ({sink.seconds:.0f}s di audio). "
+                f"Speaker **{escape_md(saved['name'])}** salvato ({sink.seconds:.0f}s di audio). "
                 "Ora puoi sceglierlo con `/tts-ai`."
             )
 

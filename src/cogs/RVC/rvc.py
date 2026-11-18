@@ -30,6 +30,7 @@ from pydub import AudioSegment
 from rvc_python.infer import RVCInference
 
 import gpu_utils
+import storage
 from cogs import resolve_in_dir
 
 # Sblocca le classi necessarie per fairseq/RVC (torch.load con weights_only=True)
@@ -40,7 +41,7 @@ if hasattr(torch.serialization, "add_safe_globals"):
 log = logging.getLogger(__name__)
 
 RVC_DIR = Path(__file__).parent.absolute()
-MODELS_DIR = RVC_DIR / "models"
+MODELS_DIR = storage.RVC_MODELS_DIR     # la stessa cartella gestita dalla dashboard (storage.py)
 JOBS_DIR = RVC_DIR / "jobs"
 
 MAX_SONG_SECONDS = int(os.getenv("AI_COVER_MAX_SECONDS", "900"))   # 15 minuti

@@ -237,90 +237,89 @@ brew install python@3.10 ffmpeg git
 
 ---
 
-## Dove mettere i modelli RVC (passaggi semplici)
-1. Vai nella cartella del progetto e crea la cartella dei modelli:
-```
-src/cogs/RVC/models/
-```
-2. Per ogni modello crea una cartella che contiene i file del modello (es. pesi, config). Esempio:
-```
-src/cogs/RVC/models/arianagrande/
-src/cogs/RVC/models/billieeilishep/
-```
-3. Apri (o crea) il file `src/cogs/RVC/index.json` e mappa i nomi dei modelli così:
-```json
-{
-  "nome_modello_leggibile": "nome_cartella_del_modello",
-  "aria": "arianagrande",
-  "billie": "billieeilishep"
-}
-```
-- La chiave è il nome che userai nel bot, il valore è il nome della cartella dentro `models/`.
+## Dashboard: gestire soundboard, voci clonate e modelli RVC dal browser
 
-Esempio pratico:
-```json
-{
-  "arianagrande": "arianagrande",
-  "billie": "billieeilishep"
-}
+Niente più file JSON da modificare a mano: tutto ciò che il bot "ricorda" (suoni, voci clonate, modelli RVC,
+quali modelli sono disponibili in quali server) sta in un database SQLite e si gestisce da una pagina web.
+
+### Attivarla
+1. Nel file `.env` imposta una password (almeno 8 caratteri):
 ```
+DASHBOARD_PASSWORD=una-password-lunga-e-tua
+```
+2. Avvia il bot (`make run`): nel terminale compare `🖥️  Dashboard: http://127.0.0.1:8080`. Aprila nel browser e accedi.
+
+Senza `DASHBOARD_PASSWORD` la dashboard resta **spenta** (il bot funziona uguale).
+
+| Variabile (`.env`) | Default | Significato |
+|---|---|---|
+| `DASHBOARD_PASSWORD` | — | Password di accesso (obbligatoria per attivarla) |
+| `DASHBOARD_PORT` | `8080` | Porta |
+| `DASHBOARD_HOST` | `127.0.0.1` | Indirizzo: di default solo questo computer. `0.0.0.0` = raggiungibile dalla rete (vedi sotto) |
+| `DASHBOARD_IN_BOT` | `1` | `0` = non avviarla dentro il bot (usa `make dashboard`) |
+| `DASHBOARD_COOKIE_SECURE` | `0` | `1` se la dashboard è dietro HTTPS |
+| `DASHBOARD_TRUST_PROXY` | `0` | `1` solo dietro un tuo reverse proxy: usa `X-Forwarded-For` per limitare i tentativi di accesso |
+| `DASHBOARD_MAX_SOUND_MB` | `8` | Dimensione massima di un suono caricato |
+| `DASHBOARD_MAX_VOICE_MB` | `50` | Dimensione massima del campione di una voce |
+| `DASHBOARD_MAX_RVC_MB` | `1024` | Dimensione massima di un modello RVC |
+| `DRIFTBOT_DB` | `src/cogs/data/driftbot.sqlite3` | Percorso del database |
+
+### Cosa puoi fare
+- **Panoramica** — stato del bot, numeri, stato del database e della coda di scrittura.
+- **Soundboard** — aggiungi, ascolta, rinomina, sposta ed elimina i suoni. Ogni suono è di un server **oppure globale**
+  (🌐: disponibile in tutti i server). Nel comando `/soundboard` i suoni globali compaiono con il 🌐 davanti.
+- **Voci clonate** — le voci usate da `/tts-ai`, una lista per server: ascolta, rinomina, elimina, oppure carica un campione
+  (le voci si creano anche dal bot con `/new-speaker`).
+- **Modelli RVC** — carica uno `.zip` (con il `.pth` ed eventualmente l'`.index`) o un singolo `.pth`; attiva/disattiva un modello
+  con un interruttore, scegli se è disponibile in **tutti** i server o solo in alcuni, elimina. «Cerca nuovi modelli» registra
+  le cartelle che hai copiato a mano in `src/cogs/RVC/models/`.
+- **Server** — i server in cui il bot è presente e cosa hanno salvato. **Registro** — chi ha cambiato cosa e quando.
+
+### Sicurezza
+La dashboard può caricare ed eliminare file, quindi è protetta come un pannello di amministrazione:
+password obbligatoria, in ascolto solo su `127.0.0.1`, sessione in cookie `HttpOnly` + `SameSite=Strict`, token CSRF su ogni
+modifica, blocco dopo 5 password sbagliate, controllo del formato audio dal contenuto (non dall'estensione), nomi dei file
+generati dal server (nessun percorso scelto dall'utente) e intestazioni di sicurezza (CSP, `nosniff`).
+
+**Se la apri alla rete** (`DASHBOARD_HOST=0.0.0.0`) mettila dietro un reverse proxy **HTTPS** (Caddy, nginx...) e imposta
+`DASHBOARD_COOKIE_SECURE=1`: senza HTTPS la password viaggerebbe in chiaro (il bot lo segnala nei log).
+Per accedere a una dashboard che gira su un altro computer senza esporla, puoi usare un tunnel SSH:
+`ssh -L 8080:127.0.0.1:8080 utente@server`.
+
+### Dashboard in un processo separato (facoltativo)
+Per tenere la dashboard attiva anche a bot fermo: metti `DASHBOARD_IN_BOT=0` nel `.env` e avviala con `make dashboard`.
+I due processi usano lo stesso database senza problemi (vedi sotto).
 
 ---
 
-## Dove mettere gli speaker (per server) — struttura e file JSON
-Per ogni server Discord crea una cartella con l'ID del server dentro i dati del bot. Percorso consigliato:
-```
-src/cogs/data/<server-id>/
-```
-Dentro quella cartella crea due sottocartelle:
-- `speakers/` — per gli speaker personalizzati
-- `soundboard/` — per i suoni della soundboard
+## Dove stanno i dati
 
-Struttura:
-```
-src/cogs/data/123456789012345678/
-├─ speakers/
-│  ├─ index.json
-│  └─ alias.json
-└─ soundboard/
-   └─ index.json
-```
+- **Database**: `src/cogs/data/driftbot.sqlite3` (suoni, voci, modelli, server, registro). Fai il backup di questo file
+  (con il bot fermo, oppure copiando insieme anche `-wal` e `-shm`).
+- **File dei server**: `src/cogs/data/<id-server>/soundboard/` e `.../speakers/`; i suoni globali in `src/cogs/data/global/soundboard/`.
+  I nomi dei file sono generati dal bot: gestisci tutto dalla dashboard o dai comandi, non rinominare i file a mano.
+- **Modelli RVC**: `src/cogs/RVC/models/<cartella>/`.
 
-- speakers/index.json — mappa nome_speaker -> file_wav
-```json
-{
-  "mio_speaker": "mio_speaker.wav",
-  "robot": "robot.wav"
-}
-```
+### Scritture contemporanee
+SQLite accetta una sola scrittura alla volta. Per questo ogni modifica (da un comando del bot, dalla dashboard, da un
+caricamento) passa da una **coda di scrittura**: un solo thread le esegue in ordine e le raggruppa in un'unica transazione,
+mentre le letture (autocomplete, liste) vanno in parallelo grazie alla modalità WAL e non aspettano mai la coda. Se la dashboard
+gira in un altro processo, SQLite stesso arbitra i due processi (attesa di fino a 10 secondi e nuovi tentativi). Se due persone
+creano nello stesso momento un suono con lo stesso nome ne vince uno solo, l'altro riceve un messaggio chiaro e non resta nessun file orfano.
 
-- speakers/alias.json — alias per gli speaker (opzionale)
-```json
-{
-  "bob": "mio_speaker",
-  "bobby": "mio_speaker"
-}
-```
-
-- soundboard/index.json — mappa nome_suono -> file_wav
-```json
-{
-  "applause": "applause.wav",
-  "laugh": "laugh.wav"
-}
-```
-
-Regole pratiche:
-- Metti i file .wav dentro la stessa cartella `speakers/` o `soundboard/`.
-- I nomi nei file JSON sono senza spazi e sensibili al progetto (usa underscore se vuoi).
-- Se preferisci un singolo file chiamato `speaker.json` puoi usarlo con lo stesso contenuto di `index.json`, ma il bot cerca per default `index.json` e `alias.json`.
+### Se hai già dei vecchi file JSON
+Al primo avvio il bot importa da solo `data/<server>/soundboard/index.json`, `data/<server>/speakers/index.json` (+ `alias.json`)
+e `RVC/index.json` nel database, poi rinomina i file in `*.json.migrated` (non li cancella). Le voci che puntano a file
+inesistenti vengono saltate e segnalate nei log. Dopo l'import i JSON non servono più.
 
 ---
 
 ## Note importanti
-- Assicurati che i nomi delle cartelle dei modelli corrispondano a quelli in `src/cogs/RVC/index.json`.
-- Se aggiungi o modifichi file JSON, riavvia il bot perché rilegga i dati.
 - FFmpeg è richiesto per il lavoro con audio: se il bot dà errore "ffmpeg not found", installalo come indicato sopra.
+- Nei comandi `/soundboard`, `/tts-ai`, `/rename-speaker` e `/ai-cover` scegli sempre dall'elenco che compare mentre scrivi:
+  il bot usa l'identificativo dell'elemento, non il testo digitato.
+- Un modello RVC disattivato (o limitato ad altri server) non compare in `/ai-cover`; se lo disattivi mentre una richiesta è
+  già in coda, l'utente riceve un avviso e la coda prosegue.
 
 ---
 
@@ -335,6 +334,7 @@ Regole pratiche:
 - `make help`: elenco dei comandi
 - `make install` / `make install-dev`: installa (e crea il venv se serve); `GPU=cuda|rocm|cpu` sceglie la build di PyTorch
 - `make run` (oppure `python src/main.py`): avvia il bot
+- `make dashboard`: avvia solo la dashboard, in un processo separato dal bot
 - `make test`: esegue i test con la copertura (servono le dipendenze di sviluppo: `make install-dev`)
 - `make lint`, `make format`, `make type-check`, `make pre-commit`: controlli di qualità del codice
 - `make test-py`: verifica che PyTorch veda la GPU

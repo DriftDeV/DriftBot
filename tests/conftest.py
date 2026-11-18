@@ -76,3 +76,26 @@ def _install_stubs() -> None:
 
 
 _install_stubs()
+
+
+# ---------------------------------------------------------------------------------- isolamento
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_data(tmp_path_factory, monkeypatch):
+    """
+    Nessun test deve toccare i dati veri del bot (database, cartelle dei server, modelli RVC, vecchi JSON):
+    ogni test parte da cartelle temporanee, che i singoli test possono comunque sostituire.
+    """
+    import cogs
+    import legacy_import
+    import storage
+
+    base = tmp_path_factory.mktemp("isolated")
+    monkeypatch.setenv("DRIFTBOT_DB", str(base / "driftbot.sqlite3"))
+    monkeypatch.setattr(cogs, "BASE_DATA_DIR", base / "data")
+    monkeypatch.setattr(storage, "RVC_MODELS_DIR", base / "models")
+    monkeypatch.setattr(legacy_import, "LEGACY_RVC_INDEX", base / "legacy-rvc-index.json")
+    yield base

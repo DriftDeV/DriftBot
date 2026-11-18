@@ -4,27 +4,20 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs import get_guild_dir, get_guild_json, load_json, resolve_in_dir
+import storage
 
 log = logging.getLogger(__name__)
-
-# Cartella (dentro data/<server-id>/) con index.json e i file audio, come descritto nel README.
-SOUNDBOARD_FOLDER = "soundboard"
 
 
 class Soundboards(commands.Cog) :
     '''
     Docstring for Soundboards
 
-    Questo Cog è responsabile di riprodurre dei suoni
-    da una lista di souoni (json) contenete il souno : file
+    Questo Cog è responsabile di riprodurre dei suoni dalla soundboard del server
+    (più quelle globali). L'elenco sta nel database SQLite (`bot.db`) e si gestisce dalla dashboard.
     '''
     def __init__(self, bot : commands.Bot) :
         self.bot = bot
-
-    async def open_sound_index(self, guild_id : int) -> dict :
-        sound_index = await get_guild_json(guild_id, SOUNDBOARD_FOLDER)
-        return load_json(sound_index)
 
     async def vc_connect(self, interaction : discord.Interaction) -> discord.VoiceClient | None :
         """
@@ -52,14 +45,17 @@ class Soundboards(commands.Cog) :
                                  interaction : discord.Interaction,
                                  current : str) -> list[app_commands.Choice[str]]:
         try:
-            sounds = await self.open_sound_index(interaction.guild_id)
+            sounds = await storage.list_sounds_for_guild(self.bot.db, interaction.guild_id)
         except Exception as e:
             log.warning("Autocomplete soundboard fallito: %s", e)
             return []
 
-        return [app_commands.Choice(name=name[:100], value=filename[:100])
-            for name, filename in sounds.items()
-            if current.lower() in name.lower()][:25]
+        # Il valore è l'id nel database (non il nome del file): non si può usare per uscire dalla cartella.
+        # I suoni globali, validi in tutti i server, hanno un 🌐 davanti.
+        return [app_commands.Choice(name=("🌐 " + row["name"] if row["guild_id"] == storage.GLOBAL else row["name"])[:100],
+                                    value=str(row["id"]))
+            for row in sounds
+            if current.lower() in row["name"].lower()][:25]
 
 
     @app_commands.command(name="soundboard", description="Riproduce un suono dalla lista dei suoni del server")
@@ -71,13 +67,13 @@ class Soundboards(commands.Cog) :
                 "❌ Devi essere in un canale vocale!", ephemeral=True
             )
 
-        # `soundfile` arriva dall'utente: deve restare dentro la cartella del soundboard.
-        # Si controlla PRIMA del defer: dopo un defer() pubblico Discord ignora `ephemeral`,
-        # mentre così l'errore resta visibile solo a chi ha lanciato il comando.
-        sound_dir = await get_guild_dir(interaction.guild_id, SOUNDBOARD_FOLDER)
-        sound_path = resolve_in_dir(sound_dir, soundfile)
-        if sound_path is None or not sound_path.is_file() :
+        # `soundfile` arriva dall'utente: deve essere l'id di un suono di QUESTO server (o globale)
+        # il cui file sta davvero nella cartella dei suoni. Si controlla PRIMA del defer: dopo un defer()
+        # pubblico Discord ignora `ephemeral`, mentre così l'errore resta visibile solo a chi ha lanciato il comando.
+        resolved = await storage.resolve_sound(self.bot.db, interaction.guild_id, soundfile)
+        if resolved is None :
             return await interaction.response.send_message("❌ Suono non trovato.", ephemeral=True)
+        _, sound_path = resolved
 
         # La connessione vocale può superare i 3 secondi concessi per rispondere
         await interaction.response.defer()

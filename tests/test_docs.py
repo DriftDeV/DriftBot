@@ -141,3 +141,26 @@ def test_the_requested_intents_are_the_documented_ones():
     assert main.intents.message_content is True and main.intents.voice_states and main.intents.guilds
     assert not main.intents.members and not main.intents.presences          # gli altri intent privilegiati non servono
     assert "Message Content Intent" in README
+
+
+# ------------------------------------------------------------------------------------ dashboard
+
+def test_dashboard_env_vars_in_the_code_and_in_the_readme_match():
+    sources = "".join((ROOT / "src" / name).read_text(encoding="utf-8") for name in
+                      ("dashboard/app.py", "cogs/dashboard_cog.py", "storage.py"))
+    used = set(re.findall(r'"(DASHBOARD_[A-Z_]+)"', sources))
+    documented = set(re.findall(r"`(DASHBOARD_[A-Z_]+)`", README))
+    assert {"DASHBOARD_PASSWORD", "DASHBOARD_PORT", "DASHBOARD_HOST", "DASHBOARD_IN_BOT"} <= used
+    assert used == documented, f"non documentate: {used - documented}; documentate ma inutilizzate: {documented - used}"
+
+
+def test_readme_no_longer_tells_people_to_edit_json_files_by_hand():
+    assert "index.json" in README                                   # solo nella sezione sull'import dei vecchi file
+    assert README.count("index.json") <= 3 and "alias.json" in README and "migrated" in README
+    assert "riavvia il bot perché rilegga i dati" not in README
+
+
+def test_the_gitignore_keeps_runtime_data_out_of_git():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    for pattern in ("*.sqlite3", "src/cogs/data/*", "src/cogs/RVC/models/"):
+        assert pattern in gitignore
