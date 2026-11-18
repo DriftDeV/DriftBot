@@ -1,12 +1,10 @@
-"""Test di lyrics_llm: pulizia dell'output dell'LLM, prompt, configurazione e client Ollama."""
+"""Test di lyrics_llm: pulizia dell'output dell'LLM, prompt e LyricsWriter (indipendenti dal provider)."""
 
-import aiohttp
 import pytest
-from aiohttp.test_utils import TestServer
 
 import lyrics_llm as ll
-from fake_servers import FakeOllama
-from lyrics_llm import LyricsConfig, LyricsError, OllamaLyricsWriter, clean_lyrics
+from lyrics_llm import LyricsError, LyricsWriter, clean_lyrics
+from text_llm import TextGenerator
 
 
 # ------------------------------------------------------------------ clean_lyrics
@@ -83,95 +81,47 @@ def test_messages_contain_language_duration_and_delimited_description():
     assert "Italian" in ll.build_messages("x", 30, "xx")[0]["content"]          # lingua sconosciuta -> italiano
 
 
-def test_config_from_env(monkeypatch):
-    for var in ("LYRICS_LLM_ENABLED", "LYRICS_LLM_URL", "LYRICS_LLM_MODEL", "LYRICS_LLM_TIMEOUT"):
-        monkeypatch.delenv(var, raising=False)
-    default = LyricsConfig.from_env()
-    assert (default.enabled, default.base_url, default.model) == (True, "http://127.0.0.1:11434", "qwen2.5:7b")
+# ----------------------------------------------------------------------- LyricsWriter
 
-    monkeypatch.setenv("LYRICS_LLM_ENABLED", "False")
-    monkeypatch.setenv("LYRICS_LLM_URL", " http://gpu:11434/ ")
-    monkeypatch.setenv("LYRICS_LLM_MODEL", "  ")                # vuoto -> default
-    monkeypatch.setenv("LYRICS_LLM_TIMEOUT", "abc")             # non valido -> default
-    config = LyricsConfig.from_env()
-    assert config.enabled is False and config.base_url == "http://gpu:11434"
-    assert config.model == "qwen2.5:7b" and config.timeout == 180
-    monkeypatch.setenv("LYRICS_LLM_TIMEOUT", "99999")
-    assert LyricsConfig.from_env().timeout == 1800               # limitato
+class FakeGenerator(TextGenerator):
+    """Provider finto: registra le chiamate e verifica che release() avvenga sempre."""
 
+    label = "finto"
 
-def test_model_name_normalization():
-    assert ll._normalize_model_name("Qwen2.5") == "qwen2.5:latest"
-    assert ll._normalize_model_name("qwen2.5:7b") == "qwen2.5:7b"
+    def __init__(self, text=None, error=None):
+        self.text, self.error = text, error
+        self.calls, self.released, self.closed = [], 0, 0
 
+    async def generate(self, system, user):
+        self.calls.append((system, user))
+        if self.error:
+            raise self.error
+        return self.text
 
-# ------------------------------------------------------------ client contro Ollama finto
-
-@pytest.fixture
-async def ollama():
-    fake = FakeOllama()
-    server = TestServer(fake.app())
-    await server.start_server()
-    fake.url = str(server.make_url("")).rstrip("/")
-    session = aiohttp.ClientSession()
-    config = LyricsConfig(base_url=fake.url, timeout=2, unload_timeout=0.5, poll_interval=0.01)
-    fake.writer = OllamaLyricsWriter(config, session)
-    fake.config = config
-    yield fake
-    await session.close()
-    await server.close()
+    async def release(self):
+        self.released += 1
 
 
-async def test_write_sends_the_documented_request_and_returns_clean_lyrics(ollama):
-    text = await ollama.writer.write("ballata sul mare", 90, "it")
-    assert text.startswith("[verse]") and "[chorus]" in text
-    body = ollama.chat_requests[0]
-    assert body["model"] == "qwen2.5:7b" and body["stream"] is False
-    assert body["keep_alive"] == 0                              # scarica subito dopo la risposta
-    assert body["options"]["num_ctx"] == 2048                   # contesto piccolo: poca VRAM
-    assert "ballata sul mare" in body["messages"][1]["content"]
+async def test_writer_cleans_the_output_and_releases_the_generator():
+    generator = FakeGenerator("Ecco:\n## Strofa\nprima riga lunga abbastanza\nseconda riga lunga abbastanza")
+    text = await LyricsWriter(generator).write("mare", 60, "it")
+    assert text.startswith("[verse]") and "Ecco" not in text
+    assert generator.released == 1
+    system, user = generator.calls[0]
+    assert "Italian" in system and "<description>mare</description>" in user
 
 
-async def test_errors_are_mapped_and_the_model_is_still_unloaded(ollama):
-    ollama.chat_status = 404
-    with pytest.raises(LyricsError, match="ollama pull qwen2.5:7b"):
-        await ollama.writer.write("x y z", 60, "it")
+@pytest.mark.parametrize("failure", [LyricsError("giù"), RuntimeError("inatteso")])
+async def test_writer_releases_the_generator_even_on_failure(failure):
+    generator = FakeGenerator(error=failure)
+    with pytest.raises(type(failure)):
+        await LyricsWriter(generator).write("mare", 60, "it")
+    assert generator.released == 1                     # con Ollama: modello scaricato anche dopo un errore
 
-    ollama.chat_status, ollama.sticky = 500, True
-    with pytest.raises(LyricsError, match="HTTP 500"):
-        await ollama.writer.write("x y z", 60, "it")
-    assert ollama.explicit_unloads == 1 and not ollama.loaded   # scaricato anche dopo l'errore
 
-    ollama.chat_status, ollama.content = 200, "niente di utile"
+async def test_writer_rejects_unusable_text_and_honors_max_chars():
     with pytest.raises(LyricsError, match="utilizzabile"):
-        await ollama.writer.write("x y z", 60, "it")
-
-
-async def test_timeout_still_unloads(ollama):
-    ollama.config.timeout = 0.1
-    ollama.delay, ollama.sticky = 0.5, True
-    with pytest.raises(LyricsError, match="in tempo"):
-        await ollama.writer.write("x y z", 60, "it")
-    ollama.delay = 0
-    await ollama.writer.ensure_unloaded()
-    assert not ollama.loaded
-
-
-async def test_ensure_unloaded_waits_for_the_model_to_leave_memory(ollama):
-    ollama.linger_polls = 4
-    await ollama.writer.write("x y z", 60, "it")
-    assert not ollama.loaded and ollama.ps_calls >= 2
-
-
-async def test_ensure_unloaded_gives_up_after_timeout_without_raising(ollama):
-    ollama.sticky = ollama.ignore_explicit = True
-    await ollama.writer.write("x y z", 60, "it")                # non solleva anche se non si scarica
-    assert ollama.loaded
-    assert await ollama.writer.ensure_unloaded() is False
-
-
-async def test_unreachable_ollama(ollama):
-    ollama.writer.config.base_url = "http://127.0.0.1:1"
-    with pytest.raises(LyricsError, match="non è raggiungibile"):
-        await ollama.writer.write("x y z", 60, "it")
-    assert await ollama.writer.ensure_unloaded() is True        # non verificabile: non blocca
+        await LyricsWriter(FakeGenerator("boh")).write("mare", 60, "it")
+    long_text = "[verse]\n" + "\n".join(f"riga numero {i} della canzone" for i in range(50))
+    text = await LyricsWriter(FakeGenerator(long_text), max_chars=120).write("mare", 60, "it")
+    assert len(text) <= 120

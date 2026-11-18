@@ -11,9 +11,9 @@ from aiohttp.test_utils import TestServer
 
 from cogs import ace_step_cog as ace
 from cogs.ace_step_cog import AceStepConfig, AceStepMusic
-from fake_servers import FakeAceStep, FakeOllama
+from fake_servers import FakeAceStep, FakeAnthropic, FakeOllama
 from fakes import FakeGuild, FakeInteraction, make_channel
-from lyrics_llm import LyricsConfig
+from text_llm import ClaudeConfig, LLMConfig, OllamaConfig
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ async def chain():
     acestep.url = str(servers[0].make_url("")).rstrip("/")
     ollama.url = str(servers[1].make_url("")).rstrip("/")
 
-    llm = LyricsConfig(base_url=ollama.url, timeout=2, unload_timeout=0.5, poll_interval=0.01)
+    llm = LLMConfig(ollama=OllamaConfig(base_url=ollama.url, timeout=2, unload_timeout=0.5, poll_interval=0.01))
     config = AceStepConfig(base_url=acestep.url, poll_interval=0.01, timeout=5, max_seconds=180, llm=llm)
     cog = AceStepMusic(SimpleNamespace(), config)
     guild = FakeGuild(7)
@@ -93,7 +93,7 @@ async def test_explicit_unload_when_the_model_ignores_keep_alive(chain):
 
 
 async def test_acestep_still_runs_if_the_llm_cannot_be_unloaded(chain):
-    chain.config.llm.unload_timeout = 0.1
+    chain.config.llm.ollama.unload_timeout = 0.1
     chain.llm.sticky = chain.llm.ignore_explicit = True
     it = await run(chain)
     assert final(it)["embed"].title == "🎵 Musica generata"             # non resta bloccato per sempre
@@ -166,8 +166,8 @@ async def test_messy_llm_output_is_cleaned_before_reaching_acestep(chain):
     (lambda c: setattr(c.llm, "chat_status", 404), "ollama pull qwen2.5:7b"),
     (lambda c: setattr(c.llm, "chat_status", 500), "HTTP 500"),
     (lambda c: setattr(c.llm, "content", "boh"), "utilizzabile"),
-    (lambda c: (setattr(c.config.llm, "timeout", 0.1), setattr(c.llm, "delay", 0.5)), "in tempo"),
-    (lambda c: setattr(c.config.llm, "base_url", "http://127.0.0.1:1"), "non è raggiungibile"),
+    (lambda c: (setattr(c.config.llm.ollama, "timeout", 0.1), setattr(c.llm, "delay", 0.5)), "in tempo"),
+    (lambda c: setattr(c.config.llm.ollama, "base_url", "http://127.0.0.1:1"), "non è raggiungibile"),
 ])
 async def test_llm_failure_falls_back_to_an_instrumental_track_with_a_note(chain, setup, expected):
     setup(chain)
@@ -231,3 +231,109 @@ async def test_lyrics_are_escaped_in_the_embed(chain):
     it = await run(chain)
     description = final(it)["embed"].description
     assert "\\*riga\\*" in description and "con\\_underscore" in description and "\\`riga\\`" in description
+
+
+# ============================================================ provider Claude (key nel .env)
+
+CLAUDE_KEY = "sk-ant-test-chiave-segretissima"
+CLAUDE_LYRICS = "[verse]\nOnde di Claude sul mare\nPortano via la sera\n[chorus]\nCanta con me stanotte\nIl vento ci risponde"
+
+
+@pytest.fixture
+async def chain_claude():
+    """Come `chain`, ma con ANTHROPIC_API_KEY presente: Ollama è configurato ma NON deve essere usato."""
+    events = []
+    acestep, ollama, claude = FakeAceStep(events), FakeOllama(events), FakeAnthropic(events)
+    claude.content = CLAUDE_LYRICS
+    servers = [TestServer(f.app()) for f in (acestep, ollama, claude)]
+    for server in servers:
+        await server.start_server()
+    acestep.url, ollama.url, claude.url = (str(server.make_url("")).rstrip("/") for server in servers)
+
+    llm = LLMConfig(
+        ollama=OllamaConfig(base_url=ollama.url, timeout=2, unload_timeout=0.5, poll_interval=0.01),
+        claude=ClaudeConfig(api_key=CLAUDE_KEY, base_url=claude.url, max_retries=0, timeout=5),
+    )
+    config = AceStepConfig(base_url=acestep.url, poll_interval=0.01, timeout=5, max_seconds=180, llm=llm)
+    cog = AceStepMusic(SimpleNamespace(), config)
+    guild = FakeGuild(7)
+    guild.filesize_limit = 10_000_000
+    channel = make_channel(guild)
+    yield SimpleNamespace(cog=cog, ace=acestep, llm=ollama, claude=claude, events=events,
+                          guild=guild, channel=channel, config=config)
+    await cog.cog_unload()
+    for server in servers:
+        await server.close()
+
+
+async def test_claude_writes_the_lyrics_when_the_key_is_present(chain_claude):
+    chain_claude.ace.running_polls = 1
+    it = await run(chain_claude)
+
+    body = chain_claude.ace.submitted[0]
+    assert body["lyrics"] == CLAUDE_LYRICS and body["vocal_language"] == "it"
+    assert "Onde di Claude" in final(it)["embed"].description
+    assert "testo scritto dall'AI (Claude claude-opus-5-5)" in embed_fields(it)["Dettagli"]
+    assert any("Claude claude-opus-5-5" in (e.get("content") or "") for e in it.edits)
+
+    # il flusso locale NON è stato toccato: niente chat, niente controllo della VRAM
+    assert chain_claude.llm.chat_requests == [] and chain_claude.llm.ps_calls == 0
+    assert chain_claude.events.index("claude_call") < chain_claude.events.index("ace_release")
+    request = chain_claude.claude.requests[0]["body"]
+    assert "ballata malinconica sul mare" in request["messages"][0]["content"] and "180 seconds" in request["messages"][0]["content"]
+
+
+async def test_without_the_key_the_local_flow_is_used(chain_claude):
+    chain_claude.config.llm.claude.api_key = ""                 # la key sparisce dal .env
+    it = await run(chain_claude)
+    assert chain_claude.claude.requests == [] and len(chain_claude.llm.chat_requests) == 1
+    assert "Luci di città" in chain_claude.ace.submitted[0]["lyrics"]
+    assert "testo scritto dall'AI (qwen2.5:7b)" in embed_fields(it)["Dettagli"]
+
+
+async def test_claude_lyrics_are_written_outside_the_gpu_lock(chain_claude):
+    """Claude non usa la GPU locale: mentre ACE-Step lavora per un utente, il testo dell'altro si scrive già."""
+    chain_claude.ace.gate = asyncio.Event()
+    first = asyncio.create_task(run(chain_claude, user_id=1))
+    while "ace_release" not in chain_claude.events:
+        await asyncio.sleep(0.01)
+    second = asyncio.create_task(run(chain_claude, user_id=2))
+    while chain_claude.events.count("claude_call") < 2:
+        await asyncio.sleep(0.01)
+
+    # il testo del secondo è pronto mentre il brano del primo è ancora in lavorazione...
+    assert "ace_done" not in chain_claude.events and chain_claude.events.count("ace_release") == 1
+    chain_claude.ace.gate.set()
+    for task in (first, second):
+        assert final(await task)["embed"].title == "🎵 Musica generata"
+    # ...ma ACE-Step resta uno alla volta
+    releases = [i for i, e in enumerate(chain_claude.events) if e == "ace_release"]
+    assert len(releases) == 2 and releases[1] > chain_claude.events.index("ace_done")
+    assert chain_claude.llm.chat_requests == []
+
+
+@pytest.mark.parametrize("setup, expected", [
+    (lambda c: (setattr(c.claude, "status", 401), setattr(c.claude, "error_type", "authentication_error")), "API key"),
+    (lambda c: (setattr(c.claude, "status", 529), setattr(c.claude, "error_type", "overloaded_error")), "temporaneamente"),
+    (lambda c: setattr(c.claude, "stop_reason", "refusal"), "rifiutato"),
+    (lambda c: setattr(c.claude, "content", "boh"), "utilizzabile"),
+])
+async def test_claude_failure_gives_an_instrumental_track_and_never_falls_back_to_local(chain_claude, setup, expected):
+    setup(chain_claude)
+    it = await run(chain_claude)
+    assert chain_claude.ace.submitted[0]["lyrics"] == "[Instrumental]"
+    assert final(it)["embed"].title == "🎵 Musica generata"
+    note = embed_fields(it)["⚠️ Nota"]
+    assert expected in note and "strumentale" in note.lower()
+    assert CLAUDE_KEY not in note and "boom detail" not in note
+    # con la key presente non si ripiega in silenzio sul locale (VRAM imprevista, key sbagliata nascosta)
+    assert chain_claude.llm.chat_requests == [] and chain_claude.llm.ps_calls == 0
+
+
+async def test_no_paid_call_when_lyrics_are_not_needed(chain_claude):
+    await run(chain_claude, testo="[verse]\nil mio testo\nsecondo verso")
+    await run(chain_claude, strumentale=True)
+    chain_claude.config.llm.enabled = False
+    await run(chain_claude)
+    assert chain_claude.claude.requests == [] and chain_claude.events.count("claude_call") == 0
+    assert [b["lyrics"] for b in chain_claude.ace.submitted][1:] == ["[Instrumental]", "[Instrumental]"]

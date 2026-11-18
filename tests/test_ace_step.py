@@ -14,11 +14,11 @@ from discord.ext import commands
 
 from cogs import ace_step_cog as ace
 from cogs.ace_step_cog import AceStepConfig, AceStepMusic
-from lyrics_llm import LyricsConfig
+from text_llm import LLMConfig
 from fake_servers import AUDIO, FakeAceStep
 from fakes import FakeGuild, FakeInteraction, make_channel
 
-NO_LLM = LyricsConfig(enabled=False)
+NO_LLM = LLMConfig(enabled=False)
 
 
 @pytest.fixture

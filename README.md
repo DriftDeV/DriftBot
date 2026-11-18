@@ -30,22 +30,22 @@ Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene
 |---|---|
 | `prompt` | Genere, strumenti, mood. Es. `ballata malinconica sul mare, chitarra` (3-500 caratteri) |
 | `durata` | Secondi, da 10 a `ACESTEP_MAX_SECONDS`. **Se omessa si usa il massimo (180)** |
-| `testo` | Testo con sezioni `[verse]`, `[chorus]`... **Se omesso lo scrive un LLM** a partire dal prompt |
+| `testo` | Testo con sezioni `[verse]`, `[chorus]`... **Se omesso lo scrive un LLM** (Claude o Ollama) a partire dal prompt |
 | `lingua` | Lingua del testo: italiano (default), English, Español, Français, Deutsch, Português |
 | `strumentale` | Solo musica, senza testo (e senza passare dall'LLM) |
 
 ### La catena (pensata per GPU da 8 GB)
 Su 8 GB l'LLM e il modello musicale non entrano insieme in VRAM, quindi il bot li usa **uno dopo l'altro**:
 
-1. **L'LLM scrive il testo** a partire dal prompt (solo se non hai indicato `testo` e non hai scelto `strumentale`).
-2. **L'LLM viene scaricato dalla VRAM**: il bot chiede a Ollama di liberarlo (`keep_alive: 0`) e **controlla** che non risulti più in memoria prima di andare avanti.
+1. **Un LLM scrive il testo** a partire dal prompt (solo se non hai indicato `testo` e non hai scelto `strumentale`). È **Claude** se nel `.env` c'è `ANTHROPIC_API_KEY`, altrimenti un **LLM locale con Ollama**.
+2. **Solo con Ollama: l'LLM viene scaricato dalla VRAM.** Il bot chiede a Ollama di liberarlo (`keep_alive: 0`) e **controlla** che non risulti più in memoria prima di andare avanti. Con Claude non c'è nulla da scaricare: il modello gira sui server Anthropic.
 3. **ACE-Step compone il brano** con quel testo, e il bot lo allega mostrando anche il testo.
 
-Per lo stesso motivo il bot esegue **un solo lavoro GPU alla volta**: se più utenti usano il comando insieme, gli altri aspettano in coda (con un avviso). Ogni utente può avere una sola richiesta attiva.
-Se l'LLM non è disponibile (Ollama spento, modello non scaricato, testo inutilizzabile) il brano viene generato **strumentale** e il bot lo segnala nella risposta.
+ACE-Step lavora **un brano alla volta**: se più utenti usano il comando insieme, gli altri aspettano in coda (con un avviso). Con Claude il testo si scrive subito, anche mentre ACE-Step lavora per un altro; con Ollama anche la scrittura del testo aspetta il proprio turno, perché l'LLM locale occuperebbe la VRAM. Ogni utente può avere una sola richiesta attiva.
+Se l'LLM non è disponibile (Ollama spento, key errata o credito finito, testo inutilizzabile) il brano viene generato **strumentale** e il bot lo segnala nella risposta. **Con la key presente il bot non ripiega mai in silenzio su Ollama**: sarebbe una sorpresa per la VRAM e nasconderebbe una key sbagliata.
 
 ### Cosa installare
-Il bot non carica nessun modello nel proprio processo: parla con due server separati. Così le dipendenze non entrano in conflitto con quelle di TTS/RVC e CUDA o ROCm si scelgono nell'installazione di ciascun server.
+Il bot non carica nessun modello nel proprio processo: parla con ACE-Step e con l'LLM (Claude via API, oppure Ollama) tramite rete. Così le dipendenze non entrano in conflitto con quelle di TTS/RVC e CUDA o ROCm si scelgono nell'installazione di ciascun server.
 
 **1. ACE-Step** (istruzioni ufficiali nel repository del progetto):
 ```bash
@@ -54,10 +54,19 @@ cd ACE-Step-1.5
 uv sync
 uv run acestep-api          # in ascolto su http://127.0.0.1:8001; i modelli si scaricano al primo avvio
 ```
-**2. Ollama** per l'LLM ([ollama.com](https://ollama.com), supporta NVIDIA e AMD):
+**2. L'LLM che scrive i testi: scegli una delle due strade.**
+
+*A. Claude (API)*: metti la key nel `.env`. Non serve GPU né un modello da scaricare.
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+*B. Ollama (locale, gratis)*: se nel `.env` **non** c'è la key, il bot usa questo. Funziona con NVIDIA e AMD ([ollama.com](https://ollama.com)):
 ```bash
 ollama pull qwen2.5:7b      # ~4.7 GB, entra in 8 GB. Alternative più leggere: llama3.2:3b, gemma3:4b
 ```
+> ℹ️ **Claude è a pagamento e i dati escono dal tuo computer.** Con la key presente il prompt (e solo quello) viene inviato ad Anthropic. Il modello predefinito è `claude-opus-5-5`; per spendere molto meno imposta `CLAUDE_MODEL=claude-haiku-5-5`. Il costo per brano dipende dalla lunghezza del testo; il limite di richieste del bot (`ACESTEP_MAX_PENDING`, una per utente) ne contiene la spesa.
+> Il bot abilita di default il **fallback lato server** di Anthropic: se i classificatori di sicurezza rifiutano una richiesta, viene ripetuta su un altro modello (disattivabile con `CLAUDE_REFUSAL_FALLBACK=false`; se il tuo account non lo supporta il bot lo disattiva da solo).
+
 Poi il bot li trova da solo. Se i server sono altrove o protetti, imposta nel `.env`:
 
 | Variabile | Default | Effetto |
@@ -69,17 +78,24 @@ Poi il bot li trova da solo. Se i server sono altrove o protetti, imposta nel `.
 | `ACESTEP_MAX_PENDING` | `5` | Richieste accettate insieme (in coda + in corso) |
 | `ACESTEP_AUDIO_FORMAT` | `mp3` | `mp3`, `flac`, `opus`, `aac` o `wav` |
 | `ACESTEP_DEFAULT_LANGUAGE` | `it` | Lingua del testo se non indicata: `it`, `en`, `es`, `fr`, `de`, `pt` |
-| `LYRICS_LLM_ENABLED` | `true` | `false` = senza `testo` il brano è sempre strumentale |
-| `LYRICS_LLM_URL` | `http://127.0.0.1:11434` | Indirizzo di Ollama |
-| `LYRICS_LLM_MODEL` | `qwen2.5:7b` | Modello che scrive il testo (meglio non usare modelli "thinking") |
-| `LYRICS_LLM_TIMEOUT` | `180` | Secondi massimi per caricare il modello e scrivere il testo |
+| `LYRICS_LLM_ENABLED` | `true` | `false` = senza `testo` il brano è sempre strumentale (nessun LLM, né Claude né Ollama) |
+| `ANTHROPIC_API_KEY` | vuota | **Se presente si usa Claude**; se vuota/assente si usa Ollama |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Modello Claude (es. `claude-haiku-5-5` per spendere molto meno) |
+| `CLAUDE_EFFORT` | `low` | Quanto ragiona il modello: `low`, `medium`, `high`, `xhigh`, `max`. Vuoto = non inviarlo (serve con modelli più vecchi che non lo supportano) |
+| `CLAUDE_TIMEOUT` | `120` | Secondi massimi per richiesta a Claude |
+| `CLAUDE_REFUSAL_FALLBACK` | `true` | Fallback lato server sui rifiuti di sicurezza |
+| `ANTHROPIC_BASE_URL` | vuota | Facoltativo: proxy o gateway verso l'API |
+| `LYRICS_LLM_URL` | `http://127.0.0.1:11434` | Indirizzo di Ollama (solo senza key) |
+| `LYRICS_LLM_MODEL` | `qwen2.5:7b` | Modello Ollama (meglio non usare modelli "thinking") |
+| `LYRICS_LLM_TIMEOUT` | `180` | Ollama: secondi massimi per caricare il modello e scrivere il testo |
 
 ### Consigli per 8 GB
+- **Con Claude** la VRAM è tutta per ACE-Step: è la configurazione più semplice per schede piccole.
 - **ACE-Step:** il suo profilo per 8-12 GB tiene i modelli in RAM quando non servono (offload su CPU), ed è quello che permette all'LLM di usare la GPU mentre ACE-Step è fermo. Controlla con `nvidia-smi` (o `rocm-smi`) a server inattivo che la VRAM occupata sia poca; se non lo è, prova ad avviarlo con `MAX_CUDA_VRAM=8`.
 - ⚠️ **Il modello TTS (`/speak`) resta caricato in VRAM** per tutto il tempo in cui il bot è acceso, e AI cover usa la GPU a sua volta. Su una sola scheda da 8 GB non c'è spazio per tutto: usa una seconda GPU o un'altra macchina per ACE-Step/Ollama (`ACESTEP_API_URL`, `LYRICS_LLM_URL`; per scegliere la GPU `CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD), oppure disattiva il cog TTS.
 - Il supporto AMD ROCm di ACE-Step e di Ollama è dichiarato dai rispettivi progetti: controlla i requisiti nella loro documentazione.
 
-Se un server non è avviato, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
+Se un server non è raggiungibile, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
 
 ---
 

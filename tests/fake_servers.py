@@ -169,3 +169,52 @@ class FakeOllama:
         self.log.append("ps:loaded" if self.loaded else "ps:empty")
         models = [{"name": self.model, "model": self.model, "size_vram": 5_000_000_000}] if self.loaded else []
         return web.json_response({"models": models})
+
+
+class FakeAnthropic:
+    """
+    API Messages di Anthropic finta (POST /v1/messages, anche nella variante beta ?beta=true).
+    Registra ogni richiesta (header, query, body) per verificare il contratto, e un log eventi condiviso.
+    """
+
+    GOOD = FakeOllama.GOOD
+
+    def __init__(self, log=None):
+        self.log = log if log is not None else []
+        self.content = self.GOOD
+        self.blocks = None               # blocchi `content` personalizzati
+        self.stop_reason = "end_turn"
+        self.status = 200
+        self.error_type = "api_error"
+        self.error_message = "boom detail con dati interni"
+        self.delay = 0.0
+        self.reject_fallbacks = False    # 400 se la richiesta contiene `fallbacks`
+        self.requests = []
+
+    def app(self):
+        app = web.Application()
+        app.router.add_post("/v1/messages", self.messages)
+        return app
+
+    def _error(self, status, error_type, message):
+        return web.json_response({"type": "error", "error": {"type": error_type, "message": message}},
+                                 status=status)
+
+    async def messages(self, request):
+        import asyncio
+        body = await request.json()
+        headers = {k.lower(): v for k, v in request.headers.items()}      # gli header HTTP non distinguono le maiuscole
+        self.requests.append({"headers": headers, "query": dict(request.query), "body": body})
+        self.log.append("claude_call")
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.reject_fallbacks and "fallbacks" in body:
+            return self._error(400, "invalid_request_error", "fallbacks: not supported for this account")
+        if self.status != 200:
+            return self._error(self.status, self.error_type, self.error_message)
+        content = self.blocks if self.blocks is not None else [{"type": "text", "text": self.content}]
+        return web.json_response({
+            "id": "msg_test", "type": "message", "role": "assistant", "model": body.get("model"),
+            "content": content, "stop_reason": self.stop_reason, "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        })
