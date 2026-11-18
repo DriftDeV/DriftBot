@@ -5,105 +5,20 @@ Nessuna GPU né modello: si verifica il client, non la qualità della musica.
 """
 
 import asyncio
-import json
 from types import SimpleNamespace
 
 import discord
 import pytest
-from aiohttp import web
 from aiohttp.test_utils import TestServer
 from discord.ext import commands
 
 from cogs import ace_step_cog as ace
 from cogs.ace_step_cog import AceStepConfig, AceStepMusic
+from lyrics_llm import LyricsConfig
+from fake_servers import AUDIO, FakeAceStep
 from fakes import FakeGuild, FakeInteraction, make_channel
 
-AUDIO = b"ID3" + b"\x01" * 2000
-
-
-def envelope(data, code=200, error=None):
-    return web.json_response({"data": data, "code": code, "error": error, "timestamp": 1, "extra": None})
-
-
-class FakeAceStep:
-    """Server ACE-Step finto. Le proprietà pubbliche regolano il comportamento."""
-
-    def __init__(self):
-        self.api_key = ""              # se valorizzata, richiede Authorization: Bearer
-        self.running_polls = 0         # quante volte /query_result risponde "in corso" prima del successo
-        self.final_status = 1          # stato finale del task: 1 ok, 2 fallito
-        self.item_failed = False       # task ok ma brano interno fallito
-        self.never_finish = False
-        self.gate = None               # asyncio.Event: finché non è impostato il task resta in corso
-        self.forget_tasks = False
-        self.release_http = 200
-        self.release_code = 200
-        self.bad_json = False
-        self.file_ref = "/v1/audio?path=%2Ftmp%2Fapi_audio%2Fabc.mp3"
-        self.audio = AUDIO
-        self.chunked = False
-        self.queue_position = 1
-        self.submitted = []
-        self.polls = 0
-        self.downloads = 0
-        self.headers_seen = []
-
-    def app(self):
-        app = web.Application()
-        app.router.add_get("/health", self.health)
-        app.router.add_post("/release_task", self.release_task)
-        app.router.add_post("/query_result", self.query_result)
-        app.router.add_get("/v1/audio", self.get_audio)
-        return app
-
-    def _auth_ok(self, request):
-        self.headers_seen.append(dict(request.headers))
-        return not self.api_key or request.headers.get("Authorization") == f"Bearer {self.api_key}"
-
-    async def health(self, request):
-        return envelope({"status": "ok"})
-
-    async def release_task(self, request):
-        if not self._auth_ok(request):
-            return web.json_response({"detail": "Unauthorized"}, status=401)
-        if self.release_http != 200:
-            return web.json_response({"detail": "x"}, status=self.release_http)
-        if self.bad_json:
-            return web.Response(text="<html>non json</html>", content_type="text/html")
-        body = await request.json()
-        self.submitted.append(body)
-        if self.release_code != 200:
-            return envelope(None, code=self.release_code, error="Qualcosa è andato storto /home/segreto")
-        return envelope({"task_id": "550e8400-e29b-41d4-a716-446655440000", "status": "queued",
-                         "queue_position": self.queue_position})
-
-    async def query_result(self, request):
-        if not self._auth_ok(request):
-            return web.json_response({"detail": "Unauthorized"}, status=401)
-        body = await request.json()
-        task_id = body["task_id_list"][0]
-        self.polls += 1
-        if self.forget_tasks:
-            return envelope([])
-        waiting = self.never_finish or (self.gate is not None and not self.gate.is_set()) \
-            or self.polls <= self.running_polls
-        if waiting:
-            return envelope([{"task_id": task_id, "status": 0, "result": "[]"}])
-        if self.final_status == 2:
-            return envelope([{"task_id": task_id, "status": 2, "result": "[]"}])
-        inner = {"file": self.file_ref, "status": 2 if self.item_failed else 1,
-                 "metas": {"bpm": 120, "duration": 30, "keyscale": "C major"}, "seed_value": "1"}
-        return envelope([{"task_id": task_id, "status": 1, "result": json.dumps([inner])}])
-
-    async def get_audio(self, request):
-        self.downloads += 1
-        if self.chunked:
-            response = web.StreamResponse()
-            await response.prepare(request)
-            await response.write(self.audio)
-            await response.write_eof()
-            return response
-        return web.Response(body=self.audio, content_type="audio/mpeg")
+NO_LLM = LyricsConfig(enabled=False)
 
 
 @pytest.fixture
@@ -117,6 +32,7 @@ async def srv():
 
 
 def make_cog(srv, **overrides):
+    overrides.setdefault("llm", NO_LLM)     # questi test riguardano solo ACE-Step: l'LLM è provato altrove
     config = AceStepConfig(base_url=srv.url, poll_interval=0.01, timeout=5, max_seconds=180, **overrides)
     return AceStepMusic(SimpleNamespace(), config)
 
@@ -166,7 +82,8 @@ async def test_generates_and_delivers_the_track(env):
 async def test_request_body_follows_the_documented_contract(env):
     await run(env, prompt="  synthwave  ", durata=45)
     body = env.srv.submitted[0]
-    assert body == {"prompt": "synthwave", "lyrics": "[Instrumental]", "audio_duration": 45,
+    assert body == {"prompt": "synthwave", "lyrics": "[Instrumental]", "vocal_language": "it",
+                    "audio_duration": 45,
                     "batch_size": 1, "audio_format": "mp3", "use_random_seed": True,
                     "task_type": "text2music"}
 
@@ -202,7 +119,7 @@ async def message(it):
 
 
 async def test_server_unreachable_gives_a_clear_message(srv):
-    cog = AceStepMusic(SimpleNamespace(), AceStepConfig(base_url="http://127.0.0.1:1", poll_interval=0.01))
+    cog = AceStepMusic(SimpleNamespace(), AceStepConfig(base_url="http://127.0.0.1:1", poll_interval=0.01, llm=NO_LLM))
     guild = FakeGuild(7)
     guild.filesize_limit = 10_000_000
     it = FakeInteraction(guild, make_channel(guild))
@@ -299,7 +216,7 @@ async def test_link_to_another_host_is_never_followed(env):
 
 # ------------------------------------------------------------------ concorrenza
 
-async def test_one_generation_per_user_and_global_limit(env):
+async def test_one_generation_per_user_global_limit_and_serialization(env):
     env.srv.gate = asyncio.Event()
     env.cog.config.max_pending = 2
 
@@ -307,16 +224,19 @@ async def test_one_generation_per_user_and_global_limit(env):
     second = asyncio.create_task(run(env, user_id=2))
     while len(env.cog._active_users) < 2:
         await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
 
     same_user = await run(env, user_id=1)
     assert "già una generazione" in same_user.last and same_user.sent[-1][1]["ephemeral"]
     third = await run(env, user_id=3)
-    assert "Troppe richieste" in third.last and len(env.srv.submitted) == 2
+    assert "Troppe richieste" in third.last
+    # un solo lavoro GPU alla volta: il secondo utente aspetta, non parte in parallelo
+    assert len(env.srv.submitted) == 1
 
     env.srv.gate.set()
     for task in (first, second):
         assert final(await task)["embed"].title == "🎵 Musica generata"
-    assert env.cog._active_users == set()
+    assert len(env.srv.submitted) == 2 and env.cog._active_users == set()
 
 
 async def test_expired_interaction_falls_back_to_the_channel(env):
@@ -333,7 +253,7 @@ async def test_health_check(srv):
     cog = make_cog(srv)
     assert await cog._client().health() is True
     await cog.cog_unload()
-    down = AceStepMusic(SimpleNamespace(), AceStepConfig(base_url="http://127.0.0.1:1"))
+    down = AceStepMusic(SimpleNamespace(), AceStepConfig(base_url="http://127.0.0.1:1", llm=NO_LLM))
     assert await down._client().health() is False
     await down.cog_unload()
 
@@ -369,6 +289,9 @@ async def test_command_is_registered_with_the_right_options():
     params = {p.name: p for p in command.parameters}
     assert params["prompt"].required and (params["prompt"].min_value, params["prompt"].max_value) == (3, 500)
     assert (params["durata"].min_value, params["durata"].max_value) == (10, ace.MAX_SECONDS)
-    assert params["durata"].default == 30 and not params["durata"].required
+    assert not params["durata"].required and params["durata"].default is None   # None = durata massima
     assert not params["testo"].required and params["testo"].max_value == 2000
+    assert [c.value for c in params["lingua"].choices] == ["it", "en", "es", "fr", "de", "pt"]
+    assert not params["lingua"].required
+    assert params["strumentale"].default is False
     await bot.close()

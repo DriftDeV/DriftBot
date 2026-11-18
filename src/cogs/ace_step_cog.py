@@ -1,25 +1,36 @@
 """
 ACE-Step cog — genera musica da un prompt di testo con ACE-Step 1.5.
 
-Il cog NON carica il modello nel processo del bot: parla con il server REST di ACE-Step
-(`acestep-api`) che gira a parte. Motivi:
-  - nessun conflitto di dipendenze con chatterbox/RVC (torch, transformers),
-  - il bot non si blocca durante la generazione e non tiene la VRAM occupata,
-  - CUDA (NVIDIA) o ROCm (AMD) li gestisce l'installazione del server, non il bot.
+Catena (pensata per GPU da 8 GB, dove LLM e modello musicale non entrano insieme in VRAM):
 
-Contratto usato (documentazione ACE-Step 1.5, docs/en/API.md):
-  POST /release_task   {prompt, lyrics, audio_duration, ...}  -> data.task_id
-  POST /query_result   {task_id_list: [...]}                 -> data[].status 0=in corso 1=ok 2=fallito
-  GET  /v1/audio?path=...                                    -> file audio
+    prompt -> [se manca il testo] un LLM (Ollama) scrive il testo -> LLM SCARICATO dalla VRAM
+           -> ACE-Step compone il brano con quel testo -> il bot lo allega alla risposta
+
+Il cog NON carica modelli nel processo del bot: parla con due server separati, il server REST di
+ACE-Step (`acestep-api`) e Ollama. Motivi:
+  - nessun conflitto di dipendenze con chatterbox/RVC (torch, transformers),
+  - il bot non si blocca e non tiene la VRAM occupata,
+  - CUDA (NVIDIA) o ROCm (AMD) li gestisce l'installazione dei server, non il bot,
+  - Ollama sa scaricare il modello dalla VRAM subito dopo l'uso (vedi lyrics_llm.py).
+
+Un solo lavoro GPU alla volta (lock globale sull'intera catena): altrimenti l'LLM di un utente
+si caricherebbe mentre ACE-Step genera per un altro, e su 8 GB non ci sta.
+
+Contratto ACE-Step usato (documentazione ACE-Step 1.5, docs/en/API.md):
+  POST /release_task   {prompt, lyrics, audio_duration, vocal_language, ...}  -> data.task_id
+  POST /query_result   {task_id_list: [...]}     -> data[].status 0=in corso 1=ok 2=fallito
+  GET  /v1/audio?path=...                        -> file audio
 Ogni risposta JSON ha la busta {data, code, error, timestamp, extra}.
 
 Configurazione (file .env):
-  ACESTEP_API_URL       default http://127.0.0.1:8001
-  ACESTEP_API_KEY       opzionale (header Authorization: Bearer)
-  ACESTEP_MAX_SECONDS   durata massima richiedibile, default 180 (il server accetta fino a 600)
-  ACESTEP_TIMEOUT       secondi massimi di attesa per una generazione, default 600
-  ACESTEP_MAX_PENDING   richieste contemporanee accettate dal bot, default 5
-  ACESTEP_AUDIO_FORMAT  mp3 (default), flac, opus, aac, wav
+  ACESTEP_API_URL           default http://127.0.0.1:8001
+  ACESTEP_API_KEY           opzionale (header Authorization: Bearer)
+  ACESTEP_MAX_SECONDS       durata massima E predefinita, default 180 (il server accetta fino a 600)
+  ACESTEP_TIMEOUT           secondi massimi di attesa per una generazione, default 600
+  ACESTEP_MAX_PENDING       richieste accettate contemporaneamente dal bot (in coda + in corso), default 5
+  ACESTEP_AUDIO_FORMAT      mp3 (default), flac, opus, aac, wav
+  ACESTEP_DEFAULT_LANGUAGE  lingua del testo se non indicata: it (default), en, es, fr, de, pt
+  LYRICS_LLM_*              LLM che scrive il testo: vedi lyrics_llm.py
 """
 
 import asyncio
@@ -27,8 +38,9 @@ import io
 import json
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -36,6 +48,14 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from lyrics_llm import (
+    DEFAULT_LANGUAGE,
+    LANGUAGES,
+    LyricsConfig,
+    LyricsError,
+    OllamaLyricsWriter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +84,8 @@ class AceStepConfig:
     max_pending: int = 5
     audio_format: str = "mp3"
     poll_interval: float = 3.0
+    default_language: str = DEFAULT_LANGUAGE
+    llm: LyricsConfig = field(default_factory=LyricsConfig)
 
     @classmethod
     def from_env(cls) -> "AceStepConfig":
@@ -71,7 +93,13 @@ class AceStepConfig:
         if audio_format not in ALLOWED_FORMATS:
             log.warning("ACESTEP_AUDIO_FORMAT=%r non valido: uso mp3", audio_format)
             audio_format = "mp3"
+        language = os.getenv("ACESTEP_DEFAULT_LANGUAGE", DEFAULT_LANGUAGE).strip().lower()
+        if language not in LANGUAGES:
+            log.warning("ACESTEP_DEFAULT_LANGUAGE=%r non supportata: uso %s", language, DEFAULT_LANGUAGE)
+            language = DEFAULT_LANGUAGE
         return cls(
+            default_language=language,
+            llm=LyricsConfig.from_env(),
             base_url=os.getenv("ACESTEP_API_URL", cls.base_url).strip().rstrip("/") or cls.base_url,
             api_key=os.getenv("ACESTEP_API_KEY", "").strip(),
             max_seconds=_env_int("ACESTEP_MAX_SECONDS", 180, SERVER_MIN_SECONDS, SERVER_MAX_SECONDS),
@@ -154,11 +182,14 @@ class AceStepClient:
             return False
         return isinstance(data, dict) and data.get("status") == "ok"
 
-    async def submit(self, prompt: str, lyrics: Optional[str], seconds: int) -> tuple[str, Optional[int]]:
+    async def submit(
+        self, prompt: str, lyrics: Optional[str], seconds: int, language: str = DEFAULT_LANGUAGE
+    ) -> tuple[str, Optional[int]]:
         """Accoda una generazione. Restituisce (task_id, posizione in coda)."""
         body = {
             "prompt": prompt,
             "lyrics": lyrics or INSTRUMENTAL_LYRICS,
+            "vocal_language": language,
             "audio_duration": seconds,
             "batch_size": 1,                       # un solo brano: più veloce e un solo file da inviare
             "audio_format": self.config.audio_format,
@@ -261,19 +292,34 @@ class AceStepClient:
 
 # -------------------------------------------------------------------------------------- cog
 
+LANGUAGE_CHOICES = [
+    app_commands.Choice(name="Italiano", value="it"),
+    app_commands.Choice(name="English", value="en"),
+    app_commands.Choice(name="Español", value="es"),
+    app_commands.Choice(name="Français", value="fr"),
+    app_commands.Choice(name="Deutsch", value="de"),
+    app_commands.Choice(name="Português", value="pt"),
+]
+
+
 class AceStepMusic(commands.Cog):
-    """Genera musica da un prompt con ACE-Step."""
+    """Genera musica da un prompt con ACE-Step, scrivendo il testo con un LLM se manca."""
 
     def __init__(self, bot: commands.Bot, config: Optional[AceStepConfig] = None):
         self.bot = bot
         self.config = config or AceStepConfig.from_env()
         self._session: Optional[aiohttp.ClientSession] = None
         self._active_users: set[int] = set()
+        # Un solo lavoro GPU alla volta: LLM e ACE-Step non devono mai essere in VRAM insieme.
+        self._gpu_lock = asyncio.Lock()
 
-    def _client(self) -> AceStepClient:
+    def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
-        return AceStepClient(self.config, self._session)
+        return self._session
+
+    def _client(self) -> AceStepClient:
+        return AceStepClient(self.config, self._http())
 
     async def cog_unload(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -332,20 +378,32 @@ class AceStepMusic(commands.Cog):
     @app_commands.command(name="ace-step", description="Genera musica con l'AI (ACE-Step) da un prompt")
     @app_commands.describe(
         prompt="Descrivi la musica: genere, strumenti, mood (es. 'lofi hip hop, piano, rilassante')",
-        durata=f"Durata in secondi (10-{MAX_SECONDS}, default 30)",
-        testo="Testo della canzone con [verse]/[chorus] (vuoto = strumentale)",
+        durata=f"Durata in secondi (10-{MAX_SECONDS}). Se omessa: {MAX_SECONDS}",
+        testo="Testo della canzone con [verse]/[chorus]. Se omesso lo scrive l'AI",
+        lingua="Lingua del testo (default: italiano)",
+        strumentale="Solo musica, senza testo",
     )
+    @app_commands.choices(lingua=LANGUAGE_CHOICES)
     async def ace_step(
         self,
         interaction: discord.Interaction,
         prompt: app_commands.Range[str, 3, 500],
-        durata: app_commands.Range[int, SERVER_MIN_SECONDS, MAX_SECONDS] = 30,
+        durata: Optional[app_commands.Range[int, SERVER_MIN_SECONDS, MAX_SECONDS]] = None,
         testo: Optional[app_commands.Range[str, 1, 2000]] = None,
+        lingua: Optional[str] = None,
+        strumentale: bool = False,
     ) -> None:
         prompt = prompt.strip()
         if len(prompt) < 3:
             return await interaction.response.send_message("❌ Il prompt è troppo corto.", ephemeral=True)
-        durata = max(SERVER_MIN_SECONDS, min(durata, self.config.max_seconds))
+        if strumentale and testo:
+            return await interaction.response.send_message(
+                "❌ `testo` e `strumentale` sono in contrasto: usane uno solo.", ephemeral=True
+            )
+        # Senza durata si usa il massimo
+        seconds = self.config.max_seconds if durata is None else durata
+        seconds = max(SERVER_MIN_SECONDS, min(seconds, self.config.max_seconds))
+        language = lingua if lingua in LANGUAGES else self.config.default_language
 
         user_id = interaction.user.id
         if user_id in self._active_users:
@@ -360,48 +418,110 @@ class AceStepMusic(commands.Cog):
         self._active_users.add(user_id)
         try:
             await interaction.response.defer(thinking=True)
-            await self._generate(interaction, prompt, durata, testo.strip() if testo else None)
+            await self._generate(
+                interaction, prompt, seconds, testo.strip() if testo else None, language, strumentale
+            )
         finally:
             self._active_users.discard(user_id)
 
-    async def _generate(
-        self, interaction: discord.Interaction, prompt: str, seconds: int, lyrics: Optional[str]
-    ) -> None:
-        client = self._client()
-        started = time.monotonic()
+    async def _prepare_lyrics(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        seconds: int,
+        lyrics: Optional[str],
+        language: str,
+        instrumental: bool,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Decide il testo del brano. Restituisce (testo, origine, nota):
+        origine = "utente" | "ai" | None (strumentale); nota = avviso da mostrare all'utente.
+        Se l'LLM non è disponibile il brano diventa strumentale invece di fallire.
+        """
+        if instrumental:
+            return None, None, None
+        if lyrics:
+            return lyrics, "utente", None
+        if not self.config.llm.enabled:
+            return None, None, None
+
+        await self._edit(
+            interaction, content=f"✍️ Sto scrivendo il testo con l'AI (`{self.config.llm.model}`)..."
+        )
+        writer = OllamaLyricsWriter(self.config.llm, self._http())
         try:
-            task_id, position = await client.submit(prompt, lyrics, seconds)
-            if position and position > 1:
-                await self._edit(interaction, content=f"⏳ In coda sul server ACE-Step (posizione {position})...")
-
-            async def announce_running() -> None:
-                await self._edit(
-                    interaction,
-                    content="🎼 Sto componendo il brano... può volerci qualche minuto.",
-                )
-
-            details = await client.wait_for_result(task_id, on_running=announce_running)
-
-            file_ref = details.get("file")
-            if not isinstance(file_ref, str) or not file_ref:
-                raise AceStepError("Il server ACE-Step non ha restituito il file audio.")
-
-            limit = getattr(interaction.guild, "filesize_limit", 8 * 1024 * 1024)
-            audio = await client.download(file_ref, max_bytes=limit)
-        except AceStepError as e:
-            log.info("ace-step: %s", e)
-            return await self._deliver(interaction, content=f"❌ {e}")
+            # write() scarica SEMPRE l'LLM dalla VRAM prima di tornare: ora ACE-Step ha la GPU libera
+            written = await writer.write(prompt, seconds, language)
+        except LyricsError as e:
+            log.info("Testo non generato: %s", e)
+            return None, None, f"Non sono riuscito a scrivere il testo ({e}) Brano strumentale."
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("Errore imprevisto in /ace-step")
-            return await self._deliver(
-                interaction, content="❌ Errore imprevisto durante la generazione del brano."
+            log.exception("Errore imprevisto nella scrittura del testo")
+            return None, None, "Non sono riuscito a scrivere il testo. Brano strumentale."
+        return written, "ai", None
+
+    async def _generate(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        seconds: int,
+        lyrics: Optional[str],
+        language: str,
+        instrumental: bool,
+    ) -> None:
+        client = self._client()
+        started = time.monotonic()
+
+        ahead = len(self._active_users) - 1
+        if ahead > 0:
+            await self._edit(
+                interaction, content=f"⏳ In coda: {ahead} richiest{'a' if ahead == 1 else 'e'} prima della tua..."
             )
+
+        async with self._gpu_lock:
+            try:
+                lyrics, source, note = await self._prepare_lyrics(
+                    interaction, prompt, seconds, lyrics, language, instrumental
+                )
+
+                task_id, position = await client.submit(prompt, lyrics, seconds, language)
+                if position and position > 1:
+                    await self._edit(
+                        interaction, content=f"⏳ In coda sul server ACE-Step (posizione {position})..."
+                    )
+
+                async def announce_running() -> None:
+                    await self._edit(
+                        interaction,
+                        content="🎼 Sto componendo il brano... può volerci qualche minuto.",
+                    )
+
+                details = await client.wait_for_result(task_id, on_running=announce_running)
+
+                file_ref = details.get("file")
+                if not isinstance(file_ref, str) or not file_ref:
+                    raise AceStepError("Il server ACE-Step non ha restituito il file audio.")
+
+                limit = getattr(interaction.guild, "filesize_limit", 8 * 1024 * 1024)
+                audio = await client.download(file_ref, max_bytes=limit)
+            except AceStepError as e:
+                log.info("ace-step: %s", e)
+                return await self._deliver(interaction, content=f"❌ {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Errore imprevisto in /ace-step")
+                return await self._deliver(
+                    interaction, content="❌ Errore imprevisto durante la generazione del brano."
+                )
 
         await self._deliver(
             interaction,
-            embed=self._result_embed(interaction, prompt, seconds, lyrics, details, time.monotonic() - started),
+            embed=self._result_embed(
+                interaction, prompt, seconds, lyrics, source, note, details, time.monotonic() - started
+            ),
             audio=audio,
             filename=self._filename(prompt, self.config.audio_format),
         )
@@ -409,17 +529,24 @@ class AceStepMusic(commands.Cog):
     @staticmethod
     def _result_embed(
         interaction: discord.Interaction, prompt: str, seconds: int,
-        lyrics: Optional[str], details: dict, elapsed: float,
+        lyrics: Optional[str], source: Optional[str], note: Optional[str],
+        details: dict, elapsed: float,
     ) -> discord.Embed:
         embed = discord.Embed(title="🎵 Musica generata", color=discord.Color.purple())
+        if lyrics:
+            # il testo può contenere * o _ : senza escape romperebbe la formattazione
+            embed.description = re.sub(r"([*_`~|>\\])", r"\\\1", lyrics)[:4000]
         embed.add_field(name="Prompt", value=prompt[:1024], inline=False)
         metas = details.get("metas") if isinstance(details.get("metas"), dict) else {}
-        info = [f"{seconds}s", "con testo" if lyrics else "strumentale"]
+        origin = {"ai": "testo scritto dall'AI", "utente": "con testo"}.get(source or "", "strumentale")
+        info = [f"{seconds}s", origin]
         if metas.get("bpm"):
             info.append(f"{metas['bpm']} BPM")
         if metas.get("keyscale"):
             info.append(str(metas["keyscale"]))
         embed.add_field(name="Dettagli", value=" · ".join(info), inline=False)
+        if note:
+            embed.add_field(name="⚠️ Nota", value=note[:1024], inline=False)
         embed.add_field(name="Richiesto da", value=interaction.user.mention, inline=True)
         embed.set_footer(text=f"ACE-Step · generato in {elapsed:.0f}s")
         return embed

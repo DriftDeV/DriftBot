@@ -24,37 +24,62 @@ Se la coda finisce il bot esce dalla vocale dopo 2 minuti. Di una playlist viene
 
 ## Generare musica con l'AI (ACE-Step)
 
-`/ace-step prompt:<descrizione> [durata:<secondi>] [testo:<testo canzone>]` genera un brano originale con [ACE-Step 1.5](https://github.com/ACE-Step/ACE-Step-1.5) e lo allega alla risposta.
+`/ace-step prompt:<descrizione> [durata] [testo] [lingua] [strumentale]` genera un brano originale con [ACE-Step 1.5](https://github.com/ACE-Step/ACE-Step-1.5) e lo allega alla risposta.
 
 | Opzione | Descrizione |
 |---|---|
-| `prompt` | Genere, strumenti, mood. Es. `lofi hip hop, piano, rilassante` (3-500 caratteri) |
-| `durata` | Secondi, da 10 a `ACESTEP_MAX_SECONDS` (default 30) |
-| `testo` | Facoltativo. Testo con sezioni `[verse]`, `[chorus]`... Se vuoto il brano è strumentale |
+| `prompt` | Genere, strumenti, mood. Es. `ballata malinconica sul mare, chitarra` (3-500 caratteri) |
+| `durata` | Secondi, da 10 a `ACESTEP_MAX_SECONDS`. **Se omessa si usa il massimo (180)** |
+| `testo` | Testo con sezioni `[verse]`, `[chorus]`... **Se omesso lo scrive un LLM** a partire dal prompt |
+| `lingua` | Lingua del testo: italiano (default), English, Español, Français, Deutsch, Português |
+| `strumentale` | Solo musica, senza testo (e senza passare dall'LLM) |
 
-Ogni utente può avere una sola generazione alla volta. Se il file supera il limite di upload del server Discord, il bot lo dice e invita a scegliere una durata più breve.
+### La catena (pensata per GPU da 8 GB)
+Su 8 GB l'LLM e il modello musicale non entrano insieme in VRAM, quindi il bot li usa **uno dopo l'altro**:
 
-**ACE-Step gira come server separato**, non dentro il bot: il bot parla con il suo server REST. Così le dipendenze di ACE-Step non entrano in conflitto con quelle di TTS/RVC (`torch`, `transformers`) e CUDA o ROCm si scelgono nell'installazione del server. Installa e avvia il server (istruzioni ufficiali nel repository del progetto):
+1. **L'LLM scrive il testo** a partire dal prompt (solo se non hai indicato `testo` e non hai scelto `strumentale`).
+2. **L'LLM viene scaricato dalla VRAM**: il bot chiede a Ollama di liberarlo (`keep_alive: 0`) e **controlla** che non risulti più in memoria prima di andare avanti.
+3. **ACE-Step compone il brano** con quel testo, e il bot lo allega mostrando anche il testo.
+
+Per lo stesso motivo il bot esegue **un solo lavoro GPU alla volta**: se più utenti usano il comando insieme, gli altri aspettano in coda (con un avviso). Ogni utente può avere una sola richiesta attiva.
+Se l'LLM non è disponibile (Ollama spento, modello non scaricato, testo inutilizzabile) il brano viene generato **strumentale** e il bot lo segnala nella risposta.
+
+### Cosa installare
+Il bot non carica nessun modello nel proprio processo: parla con due server separati. Così le dipendenze non entrano in conflitto con quelle di TTS/RVC e CUDA o ROCm si scelgono nell'installazione di ciascun server.
+
+**1. ACE-Step** (istruzioni ufficiali nel repository del progetto):
 ```bash
 git clone https://github.com/ACE-Step/ACE-Step-1.5.git
 cd ACE-Step-1.5
 uv sync
 uv run acestep-api          # in ascolto su http://127.0.0.1:8001; i modelli si scaricano al primo avvio
 ```
-Poi il bot lo trova da solo. Se il server è altrove o protetto da API key, imposta nel `.env`:
+**2. Ollama** per l'LLM ([ollama.com](https://ollama.com), supporta NVIDIA e AMD):
+```bash
+ollama pull qwen2.5:7b      # ~4.7 GB, entra in 8 GB. Alternative più leggere: llama3.2:3b, gemma3:4b
+```
+Poi il bot li trova da solo. Se i server sono altrove o protetti, imposta nel `.env`:
 
 | Variabile | Default | Effetto |
 |---|---|---|
 | `ACESTEP_API_URL` | `http://127.0.0.1:8001` | Indirizzo del server ACE-Step |
-| `ACESTEP_API_KEY` | vuota | API key del server (se l'hai attivata) |
-| `ACESTEP_MAX_SECONDS` | `180` | Durata massima richiedibile (il server accetta fino a 600) |
+| `ACESTEP_API_KEY` | vuota | API key del server ACE-Step (se l'hai attivata) |
+| `ACESTEP_MAX_SECONDS` | `180` | Durata massima **e predefinita** (il server accetta fino a 600) |
 | `ACESTEP_TIMEOUT` | `600` | Secondi massimi di attesa per un brano |
-| `ACESTEP_MAX_PENDING` | `5` | Richieste contemporanee accettate dal bot |
+| `ACESTEP_MAX_PENDING` | `5` | Richieste accettate insieme (in coda + in corso) |
 | `ACESTEP_AUDIO_FORMAT` | `mp3` | `mp3`, `flac`, `opus`, `aac` o `wav` |
+| `ACESTEP_DEFAULT_LANGUAGE` | `it` | Lingua del testo se non indicata: `it`, `en`, `es`, `fr`, `de`, `pt` |
+| `LYRICS_LLM_ENABLED` | `true` | `false` = senza `testo` il brano è sempre strumentale |
+| `LYRICS_LLM_URL` | `http://127.0.0.1:11434` | Indirizzo di Ollama |
+| `LYRICS_LLM_MODEL` | `qwen2.5:7b` | Modello che scrive il testo (meglio non usare modelli "thinking") |
+| `LYRICS_LLM_TIMEOUT` | `180` | Secondi massimi per caricare il modello e scrivere il testo |
 
-⚠️ **GPU condivisa:** ACE-Step, TTS e AI cover usano tutti la GPU. Con poca VRAM conviene avviare il server ACE-Step su un'altra GPU (`CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD) o su un'altra macchina (`ACESTEP_API_URL`). Il supporto AMD ROCm del server è dichiarato dal progetto ACE-Step: controlla i requisiti nella sua documentazione.
+### Consigli per 8 GB
+- **ACE-Step:** il suo profilo per 8-12 GB tiene i modelli in RAM quando non servono (offload su CPU), ed è quello che permette all'LLM di usare la GPU mentre ACE-Step è fermo. Controlla con `nvidia-smi` (o `rocm-smi`) a server inattivo che la VRAM occupata sia poca; se non lo è, prova ad avviarlo con `MAX_CUDA_VRAM=8`.
+- ⚠️ **Il modello TTS (`/speak`) resta caricato in VRAM** per tutto il tempo in cui il bot è acceso, e AI cover usa la GPU a sua volta. Su una sola scheda da 8 GB non c'è spazio per tutto: usa una seconda GPU o un'altra macchina per ACE-Step/Ollama (`ACESTEP_API_URL`, `LYRICS_LLM_URL`; per scegliere la GPU `CUDA_VISIBLE_DEVICES=1` su NVIDIA, `HIP_VISIBLE_DEVICES=1` su AMD), oppure disattiva il cog TTS.
+- Il supporto AMD ROCm di ACE-Step e di Ollama è dichiarato dai rispettivi progetti: controlla i requisiti nella loro documentazione.
 
-Se il server non è avviato, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
+Se un server non è avviato, `/ace-step` risponde con un messaggio chiaro e il resto del bot funziona normalmente.
 
 ---
 
