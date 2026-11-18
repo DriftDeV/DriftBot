@@ -156,3 +156,12 @@ src/cogs/RVC/*/temp/
 
 # File temporanei delle AI cover
 src/cogs/RVC/jobs/
+
+# Dati runtime del bot: database SQLite, file dei server (suoni, voci), modelli RVC, job temporanei
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.migrated
+src/cogs/data/*
+src/cogs/RVC/models/
+src/cogs/RVC/jobs/

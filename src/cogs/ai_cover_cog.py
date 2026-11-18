@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -8,12 +7,10 @@ from discord import app_commands
 from discord.ext import commands
 
 import gpu_utils
-from cogs import load_json
+import storage
 from cogs.RVC import rvc
 
 log = logging.getLogger(__name__)
-
-CURRDIR = Path(__file__).parent.absolute()
 
 MAX_QUEUE = 10          # richieste massime in coda per tutto il bot
 IDLE_DISCONNECT = 30    # secondi di attesa a coda vuota prima di lasciare la vocale
@@ -35,9 +32,6 @@ class AICover(commands.Cog):
         for task in (self.worker_task, self._idle_task):
             if task and not task.done():
                 task.cancel()
-
-    async def open_models_list(self) -> dict:
-        return load_json(CURRDIR / "RVC" / "index.json")
 
     async def vc_connect(self, member: discord.Member, guild: discord.Guild) -> Optional[discord.VoiceClient]:
         """Connette (o sposta) il bot nel canale vocale di `member`. Non risponde a nessuna interazione."""
@@ -82,11 +76,13 @@ class AICover(commands.Cog):
 
     async def model_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         try:
-            models = await self.open_models_list()
+            models = await storage.list_rvc_models(self.bot.db, interaction.guild_id, usable_only=True)
         except Exception as e:
             log.warning("Autocomplete modelli fallito: %s", e)
             return []
-        return [app_commands.Choice(name=name[:100], value=filename[:100]) for name, filename in models.items() if current.lower() in name.lower()][:25]
+        # Il valore è l'id del modello nel database: solo i modelli abilitati per questo server
+        return [app_commands.Choice(name=row["name"][:100], value=str(row["id"]))
+                for row in models if current.lower() in row["name"].lower()][:25]
 
     @app_commands.command(name="ai-cover", description="Crea una cover AI della tua canzone preferita")
     @app_commands.describe(
@@ -106,12 +102,14 @@ class AICover(commands.Cog):
         if not interaction.user.voice or interaction.user.voice.channel is None:
             return await interaction.response.send_message("❌ Devi essere in un canale vocale!", ephemeral=True)
 
-        # Validazione input (URL http(s) e modello dentro la cartella dei modelli)
+        # Validazione input: URL http(s) e modello abilitato per questo server (con la cartella al suo posto)
         try:
             url = rvc.validate_url(url)
-            rvc.resolve_model(model)
         except rvc.CoverError as e:
             return await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        model_row = await storage.resolve_rvc_model(self.bot.db, interaction.guild_id, model)
+        if model_row is None:
+            return await interaction.response.send_message("❌ Modello non trovato.", ephemeral=True)
 
         if self.queue.qsize() >= MAX_QUEUE:
             return await interaction.response.send_message(
@@ -126,7 +124,8 @@ class AICover(commands.Cog):
         item = {
             "interaction": interaction,
             "url": url,
-            "model": model,
+            "model": model_row["name"],        # nome mostrato all'utente
+            "model_id": model_row["id"],       # per ricontrollare che sia ancora utilizzabile quando tocca a lui
             "Pitch": pitch
         }
 
@@ -196,7 +195,12 @@ class AICover(commands.Cog):
         embed.add_field(name="Utente", value=f"{user.mention}")
         await self._notify(interaction, embed=embed)
 
-        output_path = await rvc.ai_cover(interaction.guild_id, item["model"], item["url"], item["Pitch"])
+        # Il modello può essere stato disattivato o eliminato dalla dashboard mentre la richiesta era in coda
+        model_row = await storage.resolve_rvc_model(self.bot.db, interaction.guild_id, item["model_id"])
+        if model_row is None:
+            raise rvc.CoverError(f"Il modello «{item['model']}» non è più disponibile.")
+
+        output_path = await rvc.ai_cover(interaction.guild_id, model_row["folder"], item["url"], item["Pitch"])
         try:
             if not output_path.exists():
                 raise FileNotFoundError("File audio non trovato.")

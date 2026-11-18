@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import gpu_utils  # noqa: E402  (deve venire dopo load_dotenv: legge le variabili del .env)
+import legacy_import  # noqa: E402
+import storage  # noqa: E402
+from database import Database, DatabaseError  # noqa: E402
 
 # Va impostato prima che la GPU venga inizializzata da uno qualsiasi dei cog.
 gpu_utils.configure_allocator()
@@ -77,8 +80,18 @@ class MyBot(commands.Bot):
             # blocca @everyone/@here e i ruoli, lascia solo i ping agli utenti.
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
         )
+        # Database SQLite condiviso con la dashboard (soundboard, voci clonate, modelli RVC...).
+        # Viene aperto in setup_hook, PRIMA di caricare i cog che lo usano.
+        self.db: Database | None = None
 
     async def setup_hook(self):
+        # 0. Database: schema aggiornato + import una tantum dei vecchi file JSON
+        self.db = await Database.open(storage.default_db_path())
+        try:
+            await legacy_import.import_legacy_json(self.db)
+        except Exception:
+            log.exception("Import dei vecchi file JSON fallito: i dati restano nei file originali")
+
         # 1. Carica i Cogs. Un cog che non si carica (es. dipendenza mancante o libreria GPU
         #    non compatibile) non deve impedire agli altri di funzionare.
         print("--- Caricamento Cogs ---")
@@ -107,7 +120,39 @@ class MyBot(commands.Bot):
 
 
 
+    async def close(self) -> None:
+        await super().close()
+        if self.db is not None:
+            await self.db.aclose()   # porta a termine le scritture ancora in coda
+
+    async def sync_guild_cache(self) -> None:
+        """Salva nel database nome/icona dei server: la dashboard li mostra anche se gira in un altro processo."""
+        if self.db is None:
+            return
+        try:
+            await storage.sync_guilds(
+                self.db,
+                [(g.id, g.name, g.icon.url if g.icon else None, g.member_count) for g in self.guilds],
+            )
+        except Exception:
+            log.exception("Aggiornamento della cache dei server fallito")
+
+    async def on_guild_join(self, guild: discord.Guild):
+        await self.sync_guild_cache()
+
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
+        if (before.name, before.icon) != (after.name, after.icon):
+            await self.sync_guild_cache()
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        if self.db is not None:
+            try:
+                await storage.mark_guild_left(self.db, guild.id)
+            except Exception:
+                log.exception("Aggiornamento della cache dei server fallito")
+
     async def on_ready(self):
+        await self.sync_guild_cache()
         update_log = '''
         ----Bot pornto all'uso! ---
         --- AGGIORNAMENTO! ---
@@ -136,6 +181,8 @@ def run() -> None:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except DatabaseError as e:
+        sys.exit(f"❌ Database non utilizzabile: {e}")
     except discord.LoginFailure:
         sys.exit("❌ Token Discord non valido: controlla DISCORD_TOKEN nel file .env")
     except discord.PrivilegedIntentsRequired:

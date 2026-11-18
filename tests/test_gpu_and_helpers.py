@@ -8,7 +8,7 @@ import pytest
 from discord import app_commands
 
 import gpu_utils
-from cogs import load_json, resolve_in_dir, save_json
+from cogs import resolve_in_dir
 from fakes import FakeGuild, FakeInteraction
 
 
@@ -142,34 +142,7 @@ def test_out_of_memory_detection(monkeypatch):
     assert not gpu_utils.is_out_of_memory(ValueError("altro"))
 
 
-# ----------------------------------------------------------------- helper JSON
-
-def test_load_json_is_forgiving(tmp_path):
-    good = tmp_path / "a.json"
-    good.write_text('{"a": "b"}', encoding="utf-8")
-    assert load_json(good) == {"a": "b"}
-    assert load_json(tmp_path / "manca.json") == {}
-
-    corrupt = tmp_path / "c.json"
-    corrupt.write_text("{non json", encoding="utf-8")
-    assert load_json(corrupt) == {}
-
-    not_object = tmp_path / "d.json"
-    not_object.write_text("[1, 2]", encoding="utf-8")
-    assert load_json(not_object) == {}
-
-
-def test_save_json_is_atomic_and_unicode(tmp_path):
-    path = tmp_path / "s.json"
-    save_json(path, {"nome": "è"})
-    assert load_json(path) == {"nome": "è"}
-    assert "è" in path.read_text(encoding="utf-8")  # non "è"
-
-    with pytest.raises(TypeError):
-        save_json(path, {"x": object()})
-    assert load_json(path) == {"nome": "è"}  # il file originale è intatto
-    assert [p.name for p in tmp_path.iterdir()] == ["s.json"]  # nessun .tmp residuo
-
+# ----------------------------------------------------------------- helper dei percorsi
 
 def test_resolve_in_dir(tmp_path):
     base = tmp_path / "base"

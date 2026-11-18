@@ -12,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import gpu_utils
-from cogs import get_guild_dir, get_guild_json, load_json, resolve_in_dir
+import storage
 
 # torch/torchaudio/chatterbox sono opzionali all'import: se mancano o non si caricano
 # (es. libreria GPU incompatibile) il cog si carica lo stesso e /tts-ai risponde con un errore chiaro.
@@ -93,30 +93,21 @@ class TTSCog(commands.Cog):
             kwargs['map_location'] = torch.device(self.device)
         return self.original_torch_load(*args, **kwargs)
 
-    async def get_speaker_name(self, filename, interaction : discord.Interaction) -> str :
-        speakers_json = await get_guild_json(interaction.guild_id, "speakers")
-        current_speakers = load_json(speakers_json)
-        speaker_found = ""
-        for speaker, value in current_speakers.items() :
-            if value == filename :
-                speaker_found = speaker
-        return speaker_found
-
     async def autocomplete_speakers(
             self,
             interaction : discord.Interaction,
             current : str,
     ) -> list[app_commands.Choice[str]]:
         try:
-            speakers_json = await get_guild_json(interaction.guild_id, "speakers")
-            current_speakers = load_json(speakers_json)
+            voices = await storage.list_voices_for_guild(self.bot.db, interaction.guild_id)
         except Exception as e:
             self.log(f"Autocomplete speakers fallito: {e}", "WARNING")
             return []
 
-        return [app_commands.Choice(name=name[:100], value=filename[:100])
-            for name, filename in current_speakers.items()
-            if current.lower() in name.lower()][:25]
+        # Il valore è l'id della voce nel database (non un nome di file)
+        return [app_commands.Choice(name=row["name"][:100], value=str(row["id"]))
+            for row in voices
+            if current.lower() in row["name"].lower()][:25]
 
     async def _async_init_model(self) -> None:
         """Initialize the TTS model asynchronously."""
@@ -232,20 +223,20 @@ class TTSCog(commands.Cog):
             await interaction.response.send_message("❌ Il testo è vuoto.", ephemeral=True)
             return
 
-        # La voce scelta deve esistere (e non uscire dalla cartella degli speaker)
-        speaker_dir = await get_guild_dir(interaction.guild_id, "speakers")
-        speaker_path = resolve_in_dir(speaker_dir, speaker)
-        if speaker_path is None or not speaker_path.is_file():
-            self.log(f"Missing/invalid speaker file: {speaker!r}", "ERROR")
+        # La voce scelta deve essere una voce di QUESTO server con il campione audio presente sul disco
+        resolved = await storage.resolve_voice(self.bot.db, interaction.guild_id, speaker)
+        if resolved is None:
+            self.log(f"Missing/invalid speaker: {speaker!r}", "ERROR")
             await interaction.response.send_message(
                 "❌ Voce non trovata: scegli uno speaker dall'elenco.",
                 ephemeral=True,
             )
             return
+        voice, speaker_path = resolved
 
         target_channel = interaction.user.voice.channel
         language = lang
-        speaker_name = await self.get_speaker_name(speaker, interaction) or speaker
+        speaker_name = voice["name"]
         await interaction.response.defer()
 
         # Voice connection management

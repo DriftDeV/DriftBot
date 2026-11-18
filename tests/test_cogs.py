@@ -1,7 +1,6 @@
 """Test dei cog: soundboard, creazione speaker, pipeline RVC, AI cover, TTS (senza GPU né rete)."""
 
 import asyncio
-import json
 import os
 import subprocess
 import tempfile
@@ -15,9 +14,12 @@ import pytest
 from discord.ext import voice_recv
 
 import cogs
+import storage
+from audio_samples import wav_bytes, write
 from cogs import Create_speaker as cs
 from cogs import TTS_COG, ai_cover_cog, soundboards
 from cogs.RVC import rvc
+from database import Database
 from fakes import FakeGuild, FakeInteraction, FakeSource, FakeVC, make_channel
 
 
@@ -28,6 +30,18 @@ def data_dir(tmp_path, monkeypatch):
     return tmp_path / "data"
 
 
+@pytest.fixture
+async def db(tmp_path):
+    """Database SQLite vero (file temporaneo): è quello che i cog usano come `bot.db`."""
+    database = await Database.open(tmp_path / "bot.sqlite3")
+    yield database
+    await database.aclose()
+
+
+def upload(tmp_path, name="u.wav", data=None):
+    return write(tmp_path / "uploads" / name, data or wav_bytes())
+
+
 def http_error(status=401, text="Invalid Webhook Token"):
     return discord.HTTPException(SimpleNamespace(status=status, reason="x"), text)
 
@@ -35,34 +49,44 @@ def http_error(status=401, text="Invalid Webhook Token"):
 # ============================================================= soundboard
 
 @pytest.fixture
-def sb(data_dir, monkeypatch):
+async def sb(data_dir, db, tmp_path, monkeypatch):
     monkeypatch.setattr(discord, "FFmpegPCMAudio", FakeSource)
     guild = FakeGuild(7)
     channel = make_channel(guild)
-    sound_dir = data_dir / "7" / "soundboard"      # la cartella documentata nel README
-    sound_dir.mkdir(parents=True)
-    (sound_dir / "clap.wav").write_text("x")
-    (sound_dir / "index.json").write_text(json.dumps({"Clap": "clap.wav"}))
-    (data_dir / "secret.wav").write_text("x")
-    return SimpleNamespace(cog=soundboards.Soundboards(SimpleNamespace()), guild=guild,
-                           channel=channel, dir=sound_dir)
+    clap = await storage.add_sound(db, 7, "Clap", upload(tmp_path, "clap.wav"))
+    airhorn = await storage.add_sound(db, storage.GLOBAL, "Airhorn", upload(tmp_path, "air.wav"))
+    other = await storage.add_sound(db, 8, "Altrui", upload(tmp_path, "other.wav"))
+    write(data_dir / "secret.wav", b"x")
+    return SimpleNamespace(cog=soundboards.Soundboards(SimpleNamespace(db=db)), guild=guild, channel=channel,
+                           clap=clap, airhorn=airhorn, other=other, db=db)
 
 
-async def test_soundboard_plays_file_from_the_documented_folder(sb):
+async def test_soundboard_plays_a_sound_from_the_servers_folder(sb):
     it = FakeInteraction(sb.guild, sb.channel)
-    await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.clap["id"]))
     assert it.last == "🔊 Suono riprodotto"
-    assert sb.guild.voice_client.played[0].url.endswith("soundboard/clap.wav")
+    assert sb.guild.voice_client.played[0].url.endswith(f"7/soundboard/{sb.clap['filename']}")
+
+
+async def test_global_sounds_play_in_every_server_but_other_servers_sounds_do_not(sb):
+    it = FakeInteraction(sb.guild, sb.channel)
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.airhorn["id"]))
+    assert it.last == "🔊 Suono riprodotto"
+    assert sb.guild.voice_client.played[0].url.endswith(f"global/soundboard/{sb.airhorn['filename']}")
+
+    it = FakeInteraction(sb.guild, sb.channel)
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.other["id"]))      # suono del server 8, usato dal server 7
+    assert it.last == "❌ Suono non trovato." and it.sent[-1][1].get("ephemeral") is True
 
 
 async def test_soundboard_always_answers_when_not_in_voice(sb):
     it = FakeInteraction(sb.guild, None)
-    await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.clap["id"]))
     assert "canale vocale" in it.last and it.sent[-1][1].get("ephemeral")
 
 
-async def test_soundboard_rejects_path_traversal(sb):
-    for evil in ("../../secret.wav", "/etc/passwd", "..", "nope.wav"):
+async def test_soundboard_rejects_path_traversal_and_foreign_ids(sb):
+    for evil in ("../../secret.wav", "/etc/passwd", "..", "nope.wav", "99999", "-1", "1 OR 1=1", sb.clap["filename"]):
         it = FakeInteraction(sb.guild, sb.channel)
         await sb.cog.soundboard.callback(sb.cog, it, evil)
         assert it.last == "❌ Suono non trovato."
@@ -71,10 +95,17 @@ async def test_soundboard_rejects_path_traversal(sb):
     assert sb.guild.voice_client is None       # non si è nemmeno connesso
 
 
+async def test_soundboard_whose_file_vanished_is_reported_not_crashed(sb):
+    (storage.sounds_dir(7) / sb.clap["filename"]).unlink()
+    it = FakeInteraction(sb.guild, sb.channel)
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.clap["id"]))
+    assert it.last == "❌ Suono non trovato."
+
+
 async def test_soundboard_connection_and_ffmpeg_failures_are_reported(sb, monkeypatch):
     bad_channel = make_channel(sb.guild, fail_connect=True)
     it = FakeInteraction(sb.guild, bad_channel)
-    await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.clap["id"]))
     assert "connettermi" in it.last
 
     def boom(path):
@@ -82,15 +113,24 @@ async def test_soundboard_connection_and_ffmpeg_failures_are_reported(sb, monkey
 
     monkeypatch.setattr(discord, "FFmpegPCMAudio", boom)
     it = FakeInteraction(sb.guild, sb.channel)
-    await sb.cog.soundboard.callback(sb.cog, it, "clap.wav")
+    await sb.cog.soundboard.callback(sb.cog, it, str(sb.clap["id"]))
     assert "FFmpeg" in it.last
 
 
-async def test_soundboard_autocomplete_survives_corrupt_index(sb):
+async def test_soundboard_autocomplete_lists_server_and_global_sounds_by_id(sb):
     it = FakeInteraction(sb.guild, sb.channel)
-    assert [c.name for c in await sb.cog.sound_autocomplete(it, "cl")] == ["Clap"]
-    (sb.dir / "index.json").write_text("{rotto")
-    assert await sb.cog.sound_autocomplete(it, "cl") == []
+    found = await sb.cog.sound_autocomplete(it, "cl")
+    assert [(c.name, c.value) for c in found] == [("Clap", str(sb.clap["id"]))]
+    found = await sb.cog.sound_autocomplete(it, "")
+    assert [c.name for c in found] == ["🌐 Airhorn", "Clap"]          # niente "Altrui": è di un altro server
+    assert all(c.value.isdigit() for c in found)                       # id, non nomi di file
+
+
+async def test_soundboard_autocomplete_survives_a_database_failure(sb):
+    it = FakeInteraction(sb.guild, sb.channel)
+    assert len(await sb.cog.sound_autocomplete(it, "")) == 2
+    await sb.db.aclose()
+    assert await sb.cog.sound_autocomplete(it, "") == []
 
 
 # ================================================================ speaker
@@ -118,47 +158,78 @@ class FakeRecv(voice_recv.VoiceRecvClient):
 
 
 @pytest.fixture
-def sp(data_dir):
+async def sp(data_dir, db):
     guild = FakeGuild(7)
     channel = make_channel(guild, "voce")
-    return SimpleNamespace(cog=cs.Create_Speaker(SimpleNamespace()), guild=guild, channel=channel, dir=data_dir / "7" / "speakers")
+    return SimpleNamespace(cog=cs.Create_Speaker(SimpleNamespace(db=db)), guild=guild, channel=channel,
+                           dir=storage.voices_dir(7), db=db)
 
 
-def write_speakers(sp, speakers, aliases=None):
-    sp.dir.mkdir(parents=True, exist_ok=True)
-    (sp.dir / "index.json").write_text(json.dumps(speakers))
-    (sp.dir / "alias.json").write_text(json.dumps(aliases or {}))
+async def seed_voice(sp, name, filename=None, guild_id=7):
+    filename = filename or f"{name}_1.wav"
+    write(storage.voices_dir(guild_id) / filename, wav_bytes(2))
+    return await storage.save_recorded_voice(sp.db, guild_id, name, filename, 2.0)
+
+
+async def voices(sp):
+    return {v["name"]: v for v in await storage.list_voices(sp.db, 7)}
 
 
 async def test_rename_speaker_works(sp):
     """Prima di questa correzione /rename-speaker andava sempre in NameError."""
-    write_speakers(sp, {"bob": "bob_1.wav"})
+    bob = await seed_voice(sp, "bob")
     it = FakeInteraction(sp.guild, sp.channel)
-    await sp.cog.rename_speaker.callback(sp.cog, it, "robert", "bob_1.wav")
+    await sp.cog.rename_speaker.callback(sp.cog, it, "robert", str(bob["id"]))
     assert it.last == "✅ Speaker Rinominato!"
-    assert json.loads((sp.dir / "index.json").read_text()) == {"robert": "bob_1.wav"}
-    assert json.loads((sp.dir / "alias.json").read_text()) == {"bob": "robert"}
+    renamed = (await voices(sp))["robert"]
+    assert renamed["id"] == bob["id"] and renamed["filename"] == bob["filename"] and renamed["source_name"] == "bob"
+    assert "bob" not in await voices(sp)
 
 
 async def test_rename_speaker_errors(sp):
-    write_speakers(sp, {"bob": "bob_1.wav", "eve": "eve_1.wav"})
+    bob, eve = await seed_voice(sp, "bob"), await seed_voice(sp, "eve")
+    foreign = await seed_voice(sp, "zed", guild_id=8)
     it = FakeInteraction(sp.guild, sp.channel)
-    await sp.cog.rename_speaker.callback(sp.cog, it, "x", "inesistente.wav")
+    await sp.cog.rename_speaker.callback(sp.cog, it, "x", "99999")
     assert "non trovato" in it.last
-    await sp.cog.rename_speaker.callback(sp.cog, it, "eve", "bob_1.wav")   # nome già usato
+    await sp.cog.rename_speaker.callback(sp.cog, it, "x", str(foreign["id"]))     # voce di un altro server
+    assert "non trovato" in it.last
+    await sp.cog.rename_speaker.callback(sp.cog, it, "x", "bob_1.wav")           # un nome file non è un id
+    assert "non trovato" in it.last
+    await sp.cog.rename_speaker.callback(sp.cog, it, "EVE", str(bob["id"]))      # nome già usato (maiuscole a parte)
     assert "Esiste già" in it.last
-    await sp.cog.rename_speaker.callback(sp.cog, it, "   ", "bob_1.wav")
+    await sp.cog.rename_speaker.callback(sp.cog, it, "   ", str(bob["id"]))
     assert "vuoto" in it.last
-    assert json.loads((sp.dir / "index.json").read_text()) == {"bob": "bob_1.wav", "eve": "eve_1.wav"}
+    assert set(await voices(sp)) == {"bob", "eve"} and eve["name"] == "eve"
+    assert [v["name"] for v in await storage.list_voices(sp.db, 8)] == ["zed"]
 
 
-async def test_save_speaker_applies_alias_and_survives_corrupt_alias_file(sp):
-    write_speakers(sp, {}, {"bob": "robert"})
-    await sp.cog.save_speaker(7, "bob", "bob_2.wav")
-    assert json.loads((sp.dir / "index.json").read_text()) == {"robert": "bob_2.wav"}
-    (sp.dir / "alias.json").write_text("{rotto")
-    await sp.cog.save_speaker(7, "eve", "eve_1.wav")
-    assert json.loads((sp.dir / "index.json").read_text())["eve"] == "eve_1.wav"
+async def test_rename_speaker_can_change_only_the_capitalisation(sp):
+    bob = await seed_voice(sp, "bob")
+    it = FakeInteraction(sp.guild, sp.channel)
+    await sp.cog.rename_speaker.callback(sp.cog, it, "Bob", str(bob["id"]))
+    assert it.last == "✅ Speaker Rinominato!" and set(await voices(sp)) == {"Bob"}
+
+
+async def test_save_speaker_replaces_the_voice_of_the_same_person_even_after_a_rename(sp):
+    """Il vecchio comportamento degli alias: ri-registrare «bob» aggiorna la voce rinominata «robert»."""
+    bob = await seed_voice(sp, "bob")
+    await storage.rename_voice(sp.db, bob["id"], "robert")
+    write(sp.dir / "bob_2.wav", wav_bytes(3))
+    await sp.cog.save_speaker(7, "bob", "bob_2.wav", 3.0)
+    current = await voices(sp)
+    assert list(current) == ["robert"] and current["robert"]["filename"] == "bob_2.wav"
+    assert not (sp.dir / "bob_1.wav").exists()                      # il vecchio campione è stato eliminato
+
+
+async def test_speaker_autocomplete_lists_only_this_servers_voices_by_id(sp):
+    bob = await seed_voice(sp, "bob")
+    await seed_voice(sp, "zed", guild_id=8)
+    it = FakeInteraction(sp.guild, sp.channel)
+    assert [(c.name, c.value) for c in await sp.cog.autocomplete_speakers(it, "")] == [("bob", str(bob["id"]))]
+    assert await sp.cog.autocomplete_speakers(it, "zzz") == []
+    await sp.db.aclose()
+    assert await sp.cog.autocomplete_speakers(it, "") == []             # database chiuso: nessuna eccezione
 
 
 async def test_recording_client_replaces_a_plain_voice_client(sp):
@@ -229,7 +300,7 @@ async def test_stop_button_turns_the_panel_into_the_saved_result(sp, monkeypatch
     it, recv = await start_recording(sp, monkeypatch)
     _, view = panel(it)
     # a registrazione appena avviata lo speaker NON deve essere già in elenco
-    assert not (sp.dir / "index.json").exists() or json.loads((sp.dir / "index.json").read_text()) == {}
+    assert await storage.list_voices(sp.db, 7) == []
 
     recv.rec_sink.write(it.user, SimpleNamespace(pcm=b"\0" * (cs.BYTES_PER_SECOND * 4)))
     pressed = await click(view)
@@ -242,8 +313,9 @@ async def test_stop_button_turns_the_panel_into_the_saved_result(sp, monkeypatch
     assert final["embed"].color == discord.Color.green() and "alice" in final["embed"].description
     assert "/tts-ai" in final["embed"].description and "in corso" not in final["embed"].title
 
-    saved = json.loads((sp.dir / "index.json").read_text())
-    assert list(saved) == ["alice"] and (sp.dir / saved["alice"]).exists()
+    saved = await voices(sp)
+    assert list(saved) == ["alice"] and (sp.dir / saved["alice"]["filename"]).exists()
+    assert saved["alice"]["duration"] == pytest.approx(4.0) and saved["alice"]["source_name"] == "alice"
     assert not recv.connected and not recv.listening
 
 
@@ -256,7 +328,7 @@ async def test_too_short_recording_is_discarded_and_reported_as_a_warning(sp, mo
     assert final["embed"].title == "⚠️ Registrazione non salvata" and "troppo breve" in final["embed"].description
     assert final["embed"].color == discord.Color.orange()
     assert list(sp.dir.glob("*.wav")) == []      # file eliminato
-    assert not (sp.dir / "index.json").exists() or json.loads((sp.dir / "index.json").read_text()) == {}
+    assert await storage.list_voices(sp.db, 7) == []
 
 
 async def test_a_second_click_does_nothing(sp, monkeypatch):
@@ -328,6 +400,7 @@ async def test_speaker_command_requires_voice(sp):
 @pytest.fixture
 def rv(tmp_path, monkeypatch):
     monkeypatch.setattr(rvc, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(storage, "RVC_MODELS_DIR", tmp_path / "models")     # la stessa cartella gestita dalla dashboard
     monkeypatch.setattr(rvc, "JOBS_DIR", tmp_path / "jobs")
     (tmp_path / "models" / "voce1").mkdir(parents=True)
     return tmp_path
@@ -525,20 +598,22 @@ def test_rvc_version_detection(tmp_path, monkeypatch):
 # ============================================================= ai cover cog
 
 @pytest.fixture
-def ac(rv, monkeypatch):
+async def ac(rv, db, monkeypatch):
     monkeypatch.setattr(ai_cover_cog, "IDLE_DISCONNECT", 0.01)
     monkeypatch.setattr(discord, "FFmpegPCMAudio", FakeSource)
     guild = FakeGuild(7)
     channel = make_channel(guild)
-    cog = ai_cover_cog.AICover(SimpleNamespace(get_cog=lambda name: None))
-    yield SimpleNamespace(cog=cog, guild=guild, channel=channel, tmp=rv)
+    cog = ai_cover_cog.AICover(SimpleNamespace(get_cog=lambda name: None, db=db))
+    # il modello "voce1" (cartella creata dalla fixture `rv`) registrato nel database, disponibile ovunque
+    model = (await db.execute("INSERT INTO rvc_models (name, folder, created_at) VALUES ('Voce Uno', 'voce1', 0)")).lastrowid
+    yield SimpleNamespace(cog=cog, guild=guild, channel=channel, tmp=rv, db=db, model=str(model))
     for task in (cog.worker_task, cog._idle_task):
         if task:
             task.cancel()
 
 
-def make_item(it, url="https://x", model="voce1"):
-    return {"interaction": it, "url": url, "model": model, "Pitch": 0}
+def make_item(ac, it, url="https://x"):
+    return {"interaction": it, "url": url, "model": "Voce Uno", "model_id": int(ac.model), "Pitch": 0}
 
 
 async def test_notify_falls_back_to_channel_when_token_expired(ac):
@@ -558,26 +633,50 @@ async def test_ai_cover_command_validates_input(ac):
     callback = ac.cog.ai_cover.callback
 
     it = FakeInteraction(ac.guild, None)
-    await callback(ac.cog, it, "https://x", "voce1", 0)
+    await callback(ac.cog, it, "https://x", ac.model, 0)
     assert "canale vocale" in it.last
 
-    for url, model, expected in (("file:///etc/passwd", "voce1", "URL non valido"),
-                                 ("https://x", "../../etc", "non trovato")):
+    for url, model, expected in (("file:///etc/passwd", ac.model, "URL non valido"),
+                                 ("https://x", "../../etc", "non trovato"),
+                                 ("https://x", "voce1", "non trovato"),          # il nome della cartella non è un id
+                                 ("https://x", "99999", "non trovato")):
         it = FakeInteraction(ac.guild, ac.channel)
         await callback(ac.cog, it, url, model, 0)
         assert expected in it.last and it.sent[-1][1].get("ephemeral")
     assert ac.cog.queue.qsize() == 0
 
     it = FakeInteraction(ac.guild, ac.channel)
-    await callback(ac.cog, it, "https://youtu.be/x", "voce1", 0)
+    await callback(ac.cog, it, "https://youtu.be/x", ac.model, 0)
     assert ac.cog.queue.qsize() == 1
     assert ac.guild.voice_client is None        # nessuna connessione prematura: la fa il worker
 
     for _ in range(ai_cover_cog.MAX_QUEUE):
-        ac.cog.queue.put_nowait(make_item(it))
+        ac.cog.queue.put_nowait(make_item(ac, it))
     it = FakeInteraction(ac.guild, ac.channel)
-    await callback(ac.cog, it, "https://youtu.be/x", "voce1", 0)
+    await callback(ac.cog, it, "https://youtu.be/x", ac.model, 0)
     assert "coda è piena" in it.last
+
+
+async def test_ai_cover_only_offers_and_accepts_models_enabled_for_the_server(ac):
+    (ac.tmp / "models" / "otto").mkdir()
+    (ac.tmp / "models" / "spento").mkdir()
+    only8 = (await ac.db.execute("INSERT INTO rvc_models (name, folder, created_at) VALUES ('Solo otto', 'otto', 0)")).lastrowid
+    await ac.db.execute("INSERT INTO rvc_model_access VALUES (?, 8)", (only8,))
+    await ac.db.execute("INSERT INTO rvc_models (name, folder, enabled, created_at) VALUES ('Spento', 'spento', 0, 0)")
+
+    it = FakeInteraction(ac.guild, ac.channel)
+    offered = await ac.cog.model_autocomplete(it, "")
+    assert [(c.name, c.value) for c in offered] == [("Voce Uno", ac.model)]       # il server 7 non vede gli altri due
+    assert [c.name for c in await ac.cog.model_autocomplete(it, "voce")] == ["Voce Uno"]
+
+    for hidden in (str(only8), "3"):
+        it = FakeInteraction(ac.guild, ac.channel)
+        await ac.cog.ai_cover.callback(ac.cog, it, "https://youtu.be/x", hidden, 0)
+        assert "non trovato" in it.last
+    assert ac.cog.queue.qsize() == 0
+
+    await ac.db.aclose()
+    assert await ac.cog.model_autocomplete(it, "") == []
 
 
 async def run_worker(cog, *items):
@@ -610,7 +709,7 @@ async def test_worker_survives_errors_and_hides_details(ac, monkeypatch):
         ac.guild.voice_client.after(None)
 
     finisher = asyncio.create_task(finish_song())
-    await run_worker(ac.cog, *[make_item(it) for it in its])
+    await run_worker(ac.cog, *[make_item(ac, it) for it in its])
     await finisher
 
     assert any("troppo lungo" in t for t in its[0].texts())
@@ -632,9 +731,33 @@ async def test_user_who_left_voice_during_generation(ac, monkeypatch):
         return job / "canzone_finale.wav"
 
     monkeypatch.setattr(rvc, "ai_cover", fake_cover)
-    await ac.cog._process(make_item(it))
+    await ac.cog._process(make_item(ac, it))
     assert any("non sei più in un canale vocale" in t for t in it.texts())
     assert list(rvc.JOBS_DIR.iterdir()) == []
+
+
+async def test_a_model_disabled_or_deleted_while_queued_is_reported_and_the_worker_goes_on(ac, monkeypatch):
+    calls = []
+
+    async def fake_cover(guild_id, folder, url, pitch):
+        calls.append(folder)
+        job = rvc.create_job_dir(guild_id)
+        (job / "canzone_finale.wav").write_text("x")
+        return job / "canzone_finale.wav"
+
+    monkeypatch.setattr(rvc, "ai_cover", fake_cover)
+    it = FakeInteraction(ac.guild, ac.channel)
+    await ac.db.execute("UPDATE rvc_models SET enabled = 0")             # spento dalla dashboard dopo la richiesta
+    with pytest.raises(rvc.CoverError, match="non è più disponibile"):
+        await ac.cog._process(make_item(ac, it))
+    assert calls == []
+
+    await ac.db.execute("UPDATE rvc_models SET enabled = 1")
+    its = [FakeInteraction(ac.guild, ac.channel, user_id=i) for i in range(2)]
+    await ac.db.execute("DELETE FROM rvc_models")                        # eliminato
+    await run_worker(ac.cog, *[make_item(ac, i) for i in its])
+    assert all(any("non è più disponibile" in t for t in i.texts()) for i in its)
+    assert not ac.cog.worker_task.done() and calls == []
 
 
 async def test_idle_disconnect_never_kicks_music_or_busy_worker(ac):
@@ -675,20 +798,18 @@ class FakeModel:
 
 
 @pytest.fixture
-def tts(data_dir, monkeypatch):
+async def tts(data_dir, db, tmp_path, monkeypatch):
     monkeypatch.setattr(discord, "FFmpegPCMAudio", FakeSource)
     monkeypatch.setattr(TTS_COG, "ta", SimpleNamespace(save=lambda path, wav, sr: Path(path).write_bytes(b"RIFF")))
     guild = FakeGuild(7)
     channel = make_channel(guild)
-    speakers = data_dir / "7" / "speakers"
-    speakers.mkdir(parents=True)
-    (speakers / "ref.wav").write_text("x")
-    (speakers / "index.json").write_text(json.dumps({"Ref": "ref.wav"}))
-    (data_dir / "secret.wav").write_text("x")
-    cog = TTS_COG.TTSCog(SimpleNamespace())
+    ref = await storage.add_voice(db, 7, "Ref", upload(tmp_path, "ref.wav"))
+    foreign = await storage.add_voice(db, 8, "Altrui", upload(tmp_path, "foreign.wav"))
+    write(data_dir / "secret.wav", b"x")
+    cog = TTS_COG.TTSCog(SimpleNamespace(db=db))
     cog.device = "cpu"
     cog.model = FakeModel()
-    return SimpleNamespace(cog=cog, guild=guild, channel=channel)
+    return SimpleNamespace(cog=cog, guild=guild, channel=channel, ref=str(ref["id"]), foreign=str(foreign["id"]), db=db)
 
 
 def tts_files():
@@ -714,7 +835,7 @@ async def test_tts_generation_errors_are_mapped(tts, tmp_path):
 async def test_tts_speak_full_flow_and_cleanup(tts):
     before = tts_files()
     it = FakeInteraction(tts.guild, tts.channel)
-    await tts.cog.speak.callback(tts.cog, it, "ciao @everyone", "ref.wav", "it")
+    await tts.cog.speak.callback(tts.cog, it, "ciao @everyone", tts.ref, "it")
     vc = tts.guild.voice_client
     assert vc.playing
     reply = it.sent[-1]
@@ -730,19 +851,20 @@ async def test_tts_speak_guards(tts):
 
     tts.cog.model = None
     it = FakeInteraction(tts.guild, tts.channel)
-    await callback(tts.cog, it, "ciao", "ref.wav", "it")
+    await callback(tts.cog, it, "ciao", tts.ref, "it")
     assert "non è pronto" in it.last
     tts.cog.model = FakeModel()
 
     it = FakeInteraction(tts.guild, None)
-    await callback(tts.cog, it, "ciao", "ref.wav", "it")
+    await callback(tts.cog, it, "ciao", tts.ref, "it")
     assert "canale vocale" in it.last
 
     it = FakeInteraction(tts.guild, tts.channel)
-    await callback(tts.cog, it, "   ", "ref.wav", "it")
+    await callback(tts.cog, it, "   ", tts.ref, "it")
     assert "vuoto" in it.last
 
-    for evil in ("../../secret.wav", "/etc/passwd", "nope.wav"):
+    # nome di file, percorsi, id inesistenti e voci di un altro server: mai accettati
+    for evil in ("../../secret.wav", "/etc/passwd", "nope.wav", "ref.wav", "99999", tts.foreign):
         it = FakeInteraction(tts.guild, tts.channel)
         await callback(tts.cog, it, "ciao", evil, "it")
         assert "Voce non trovata" in it.last
@@ -759,14 +881,14 @@ async def test_tts_disconnect_during_generation_and_ffmpeg_failure(tts, monkeypa
 
     monkeypatch.setattr(tts.cog, "generate_audio", disconnect_midway)
     it = FakeInteraction(tts.guild, tts.channel)
-    await tts.cog.speak.callback(tts.cog, it, "ciao", "ref.wav", "it")
+    await tts.cog.speak.callback(tts.cog, it, "ciao", tts.ref, "it")
     assert "disconnesso" in it.last
     monkeypatch.delattr(tts.cog, "generate_audio")        # torna al metodo vero
 
     monkeypatch.setattr(discord, "FFmpegPCMAudio", lambda path: (_ for _ in ()).throw(RuntimeError("no ffmpeg")))
     tts.guild.voice_client = None
     it = FakeInteraction(tts.guild, tts.channel)
-    await tts.cog.speak.callback(tts.cog, it, "ciao", "ref.wav", "it")
+    await tts.cog.speak.callback(tts.cog, it, "ciao", tts.ref, "it")
     assert "Impossibile riprodurre" in it.last and "no ffmpeg" not in it.last
     assert tts_files() == before                                       # nessun file orfano
 
