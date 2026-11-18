@@ -177,7 +177,7 @@ class TTSCog(commands.Cog):
             self.log(f"Error generating audio: {e}", "ERROR")
             if gpu_utils.is_out_of_memory(e):
                 return "❌ Memoria GPU esaurita. Riprova con un testo più corto o tra qualche istante."
-            return "❌ Error creating audio. Try different text or speaker."
+            return "❌ Errore nella creazione dell'audio. Prova con un altro testo o un'altra voce."
         finally:
             gpu_utils.free_gpu_memory()
 
@@ -192,12 +192,12 @@ class TTSCog(commands.Cog):
 
     @app_commands.command(
         name="speak",
-        description="Generate speech from text using AI voice cloning",
+        description="Genera un audio dal testo clonando una voce con l'AI",
     )
     @app_commands.describe(
-        testo="What should I say?",
-        speaker="Which voice should speak?",
-        lang = "La Linuga"
+        testo="Cosa deve dire?",
+        speaker="Quale voce deve parlare?",
+        lang="La lingua del testo"
     )
     @app_commands.autocomplete(speaker=autocomplete_speakers)
     @app_commands.choices(
@@ -211,18 +211,19 @@ class TTSCog(commands.Cog):
         testo: app_commands.Range[str, 1, MAX_TEXT_CHARS],
         speaker: str,
         lang : str = "it") :
-        """Generate and play TTS audio in a voice channel."""
-        # Preliminary checks
+        """Genera e riproduce un audio TTS nel canale vocale dell'utente."""
+        # Controlli preliminari: tutti PRIMA del defer. Dopo un defer() pubblico Discord ignora
+        # `ephemeral`, quindi solo così gli errori restano visibili a chi ha lanciato il comando.
         if self.model is None:
             await interaction.response.send_message(
-                "❌ TTS system is not ready. Check the console.",
+                "❌ Il sistema TTS non è pronto: controlla la console del bot.",
                 ephemeral=True,
             )
             return
 
         if not interaction.user.voice or interaction.user.voice.channel is None:
             await interaction.response.send_message(
-                "❌ You must be in a voice channel!",
+                "❌ Devi essere in un canale vocale!",
                 ephemeral=True,
             )
             return
@@ -231,21 +232,21 @@ class TTSCog(commands.Cog):
             await interaction.response.send_message("❌ Il testo è vuoto.", ephemeral=True)
             return
 
-        # Setup and defer response
+        # La voce scelta deve esistere (e non uscire dalla cartella degli speaker)
         speaker_dir = await get_guild_dir(interaction.guild_id, "speakers")
-        await interaction.response.defer()
-        target_channel = interaction.user.voice.channel
-        language = lang
-        speaker_name = await self.get_speaker_name(speaker, interaction) or speaker
-
-        # Verify speaker file exists (e non esce dalla cartella degli speaker)
         speaker_path = resolve_in_dir(speaker_dir, speaker)
         if speaker_path is None or not speaker_path.is_file():
             self.log(f"Missing/invalid speaker file: {speaker!r}", "ERROR")
-            await interaction.followup.send(
-                "❌ Configuration error: speaker file not found."
+            await interaction.response.send_message(
+                "❌ Voce non trovata: scegli uno speaker dall'elenco.",
+                ephemeral=True,
             )
             return
+
+        target_channel = interaction.user.voice.channel
+        language = lang
+        speaker_name = await self.get_speaker_name(speaker, interaction) or speaker
+        await interaction.response.defer()
 
         # Voice connection management
         vc = interaction.guild.voice_client
@@ -259,7 +260,7 @@ class TTSCog(commands.Cog):
         except Exception as e:
             self.log(f"Voice connection error: {e}", "ERROR")
             await interaction.followup.send(
-                "❌ Cannot connect to voice channel."
+                "❌ Non riesco a connettermi al canale vocale."
             )
             return
 
@@ -317,14 +318,14 @@ class TTSCog(commands.Cog):
         except Exception as e:
             self.log(f"Playback error: {e}", "ERROR")
             self._remove_file(file_out)
-            await interaction.followup.send("⚠️ Playback error: impossibile riprodurre l'audio (FFmpeg installato?).")
+            await interaction.followup.send("⚠️ Impossibile riprodurre l'audio (FFmpeg installato?).")
 
     @app_commands.command(
         name="leave",
-        description="Disconnect the bot from the voice channel",
+        description="Disconnette il bot dal canale vocale",
     )
     async def disconnetti(self, interaction: discord.Interaction) -> None:
-        """Disconnect the bot from voice channel."""
+        """Disconnette il bot dal canale vocale."""
         vc = interaction.guild.voice_client
         if vc:
             try:
@@ -333,11 +334,11 @@ class TTSCog(commands.Cog):
                 self.log(f"Disconnect error: {e}", "ERROR")
                 await interaction.response.send_message("❌ Errore durante la disconnessione.", ephemeral=True)
                 return
-            await interaction.response.send_message("👋 Disconnected.")
+            await interaction.response.send_message("👋 Disconnesso.")
             self.log("Bot disconnected manually.", "INFO")
         else:
             await interaction.response.send_message(
-                "❌ Not connected to any voice channel.",
+                "❌ Non sono connesso a nessun canale vocale.",
                 ephemeral=True,
             )
 

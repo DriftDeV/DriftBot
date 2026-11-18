@@ -7,6 +7,7 @@ from discord.ext import commands
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -58,6 +59,15 @@ def save_json(path: Path, data: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def escape_md(text: str) -> str:
+    """
+    Rende innocuo il markdown di Discord in un testo che non scriviamo noi (titoli di YouTube, testi
+    di canzoni...): `**`, `_`, `` ` ``, `~`, `|`, `>` e `\\` verrebbero interpretati e rovinerebbero il messaggio.
+    Le menzioni (@everyone, ruoli) sono già bloccate da `allowed_mentions` del bot.
+    """
+    return re.sub(r"([*_`~|>\\])", r"\\\1", text)
 
 
 def resolve_in_dir(base: Path, name: str) -> Optional[Path]:

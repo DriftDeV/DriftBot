@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Optional
 from discord.ext import commands
 from discord import app_commands
 from discord.ext import voice_recv
-from cogs import get_guild_dir, get_guild_json, load_json, save_json
+from cogs import escape_md, get_guild_dir, get_guild_json, load_json, save_json
 import logging
 
 log = logging.getLogger(__name__)
@@ -69,11 +69,21 @@ class UserSpecificSink(voice_recv.AudioSink):
         return self.bytes_written / BYTES_PER_SECOND
 
 
-# Embedding RecordView
+# Risultato finale: (tipo, testo). Il tipo decide titolo e colore del pannello.
+Result = tuple[str, str]
+RESULT_STYLE = {
+    "ok": ("✅ Registrazione salvata", discord.Color.green),
+    "warn": ("⚠️ Registrazione non salvata", discord.Color.orange),
+    "error": ("❌ Registrazione non riuscita", discord.Color.red),
+}
+
+
 class RecorderView(discord.ui.View):
     """
-    View che contiene il pulsante per fermare la registrazione.
-    `on_finish` viene chiamata UNA volta (a mano o per timeout) e restituisce il messaggio finale.
+    Pannello con il pulsante per fermare la registrazione. È l'unico messaggio mostrato all'utente:
+    quando la registrazione finisce (a mano o per timeout) il pannello diventa il risultato, senza
+    pulsanti e senza lasciare un "in corso" appeso.
+    `on_finish` viene chiamata UNA volta e restituisce (tipo, testo).
     """
 
     def __init__(
@@ -81,16 +91,34 @@ class RecorderView(discord.ui.View):
         vc: voice_recv.VoiceRecvClient,
         sink: UserSpecificSink,
         origin: discord.Interaction,
-        on_finish: Callable[[], Awaitable[str]],
+        on_finish: Callable[[], Awaitable[Result]],
     ):
         super().__init__(timeout=MAX_RECORD_SECONDS)
         self.vc = vc
         self.sink = sink
         self.origin = origin
         self.on_finish = on_finish
+        self._stopping = False   # già premuto (o scaduto): un secondo click non deve fare nulla
         self._finished = False
 
-    async def _finish(self) -> Optional[str]:
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Il messaggio è privato (ephemeral), ma il pulsante resta riservato a chi ha avviato la registrazione
+        if interaction.user.id != self.origin.user.id:
+            await interaction.response.send_message(
+                "❌ Solo chi ha avviato la registrazione può fermarla.", ephemeral=True
+            )
+            return False
+        return True
+
+    @staticmethod
+    def result_embed(kind: str, text: str, timed_out: bool = False) -> discord.Embed:
+        title, color = RESULT_STYLE.get(kind, RESULT_STYLE["error"])
+        embed = discord.Embed(title=title, description=text, color=color())
+        if timed_out:
+            embed.set_footer(text=f"Tempo massimo di {MAX_RECORD_SECONDS}s raggiunto: registrazione fermata.")
+        return embed
+
+    async def _finish(self) -> Optional[Result]:
         """Ferma la registrazione, lascia la vocale e salva lo speaker. Idempotente."""
         if self._finished:
             return None
@@ -112,37 +140,41 @@ class RecorderView(discord.ui.View):
             return await self.on_finish()
         except Exception:
             log.exception("Salvataggio dello speaker fallito")
-            return "❌ Errore durante il salvataggio dello speaker."
+            return "error", "Errore durante il salvataggio dello speaker."
 
     @discord.ui.button(label="Interrompi Registrazione", style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. Aggiorna PRIMA l'interfaccia per evitare doppi click e confermare l'interazione
-        button.disabled = True
-        button.label = "Salvataggio in corso..."
-        button.style = discord.ButtonStyle.secondary
+        if self._stopping:
+            # secondo click ravvicinato: va solo confermato, altrimenti Discord mostra "interazione fallita"
+            return await interaction.response.defer()
+        self._stopping = True
 
-        # Usa response.edit_message invece di defer+edit per stabilità sugli ephemeral
-        await interaction.response.edit_message(view=self)
+        # 1. Risponde SUBITO (entro 3s) togliendo il pulsante: niente doppi click
+        saving = discord.Embed(title="💾 Salvataggio in corso...", color=discord.Color.light_grey())
+        await interaction.response.edit_message(embed=saving, view=None)
 
-        # 2. Esegui le operazioni logiche
-        message = await self._finish()
+        # 2. Ferma la registrazione e salva
+        result = await self._finish()
 
-        # 3. Invia messaggio di conferma finale
-        # Nota: Usiamo followup perché abbiamo già risposto all'interazione con edit_message
-        if message:
-            await interaction.followup.send(message, ephemeral=True)
+        # 3. Il pannello diventa il risultato finale
+        if result:
+            try:
+                await interaction.edit_original_response(embed=self.result_embed(*result), view=None)
+            except discord.HTTPException as e:
+                log.debug("Impossibile aggiornare il pannello: %s", e)
         self.stop()
 
     async def on_timeout(self):
         # Tempo massimo raggiunto senza che nessuno premesse il pulsante
-        message = await self._finish()
-        if message:
+        if self._stopping:
+            return
+        self._stopping = True
+        result = await self._finish()
+        if result:
             try:
-                await self.origin.followup.send(
-                    f"⏱️ Tempo massimo di {MAX_RECORD_SECONDS}s raggiunto. {message}", ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
+                await self.origin.edit_original_response(embed=self.result_embed(*result, timed_out=True), view=None)
+            except discord.HTTPException as e:
+                log.debug("Impossibile aggiornare il pannello dopo il timeout: %s", e)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         log.error("Errore nella view di registrazione", exc_info=error)
@@ -197,8 +229,8 @@ class Create_Speaker(commands.Cog):
             if current.lower() in name.lower()][:25]
 
 
-    @app_commands.command(name="rename-speaker", description="Rename a Speaker")
-    @app_commands.describe(new_name="il nome da dare (alias)")
+    @app_commands.command(name="rename-speaker", description="Rinomina uno speaker")
+    @app_commands.describe(new_name="Il nuovo nome (alias)", speaker="Lo speaker da rinominare")
     @app_commands.autocomplete(speaker=autocomplete_speakers)
     async def rename_speaker(
         self,
@@ -274,7 +306,15 @@ class Create_Speaker(commands.Cog):
              await interaction.response.send_message(f"❌ L'utente {target_user.mention} non è nel tuo canale vocale!", ephemeral=True)
              return
 
+        # Un solo messaggio privato per tutta l'operazione: prima "Connessione...", poi il pannello di
+        # registrazione (o l'errore) lo SOSTITUISCONO, così non resta nulla di vecchio accanto.
         await interaction.response.send_message(f"🔄 Connessione a {channel.name}...", ephemeral=True)
+
+        async def fail(text: str) -> None:
+            try:
+                await interaction.edit_original_response(content=text)
+            except discord.HTTPException as e:
+                log.debug("Impossibile mostrare l'errore: %s", e)
 
         SPEAKERS_DIR = await get_guild_dir(interaction.guild_id, "speakers")
 
@@ -282,15 +322,13 @@ class Create_Speaker(commands.Cog):
         try:
             vc = await self._get_recording_client(channel, interaction.guild)
         except RuntimeError:
-            return await interaction.followup.send(
-                "⚠️ Sto riproducendo audio: aspetta che finisca e riprova.", ephemeral=True
-            )
+            return await fail("⚠️ Sto riproducendo audio: aspetta che finisca e riprova.")
         except Exception as e:
             log.error("Errore di connessione vocale: %s", e)
-            return await interaction.followup.send("❌ Errore di connessione al canale vocale.", ephemeral=True)
+            return await fail("❌ Errore di connessione al canale vocale.")
 
         if vc.is_listening():
-            return await interaction.followup.send("⚠️ Sto già registrando un'altra sessione!", ephemeral=True)
+            return await fail("⚠️ Sto già registrando un'altra sessione!")
 
         # Generazione nome file univoco
         unique_id = uuid.uuid4()
@@ -315,36 +353,37 @@ class Create_Speaker(commands.Cog):
                 os.remove(filename)
             except OSError:
                 pass
-            return await interaction.followup.send("❌ Impossibile avviare la registrazione.", ephemeral=True)
+            return await fail("❌ Impossibile avviare la registrazione.")
 
-        async def on_finish() -> str:
+        async def on_finish() -> Result:
             # Lo speaker viene registrato solo ORA, a registrazione conclusa e con audio valido
             if sink.seconds < MIN_RECORD_SECONDS:
                 try:
                     os.remove(filename)
                 except OSError:
                     pass
-                return (
-                    f"⚠️ Registrazione troppo breve ({sink.seconds:.1f}s, minimo {MIN_RECORD_SECONDS}s): "
+                return "warn", (
+                    f"Registrazione troppo breve ({sink.seconds:.1f}s, minimo {MIN_RECORD_SECONDS}s): "
                     "nessuno speaker salvato."
                 )
             await self.save_speaker(interaction.guild_id, target_user.name, filename_only)
-            return f"✅ Registrazione terminata ({sink.seconds:.0f}s) e salvata in: `{filename_only}`"
+            return "ok", (
+                f"Speaker **{escape_md(target_user.name)}** salvato ({sink.seconds:.0f}s di audio). "
+                "Ora puoi sceglierlo con `/speak`."
+            )
 
-        # Creazione Embed
+        # Pannello di registrazione. Niente percorsi del server: sono dettagli interni che non servono all'utente.
         embed = discord.Embed(
             title="🎙️ Registrazione in corso",
-            description=f"Sto registrando l'audio di **{target_user.mention}**.",
+            description=f"Sto registrando l'audio di {target_user.mention}.",
             color=discord.Color.red()
         )
-        embed.add_field(name="Cartella", value=f"`{SPEAKERS_DIR}/`", inline=True)
         # Timestamp dinamico
         embed.add_field(name="Inizio", value=f"<t:{int(discord.utils.utcnow().timestamp())}:R>", inline=True)
         embed.set_footer(text=f"Premi il pulsante per terminare e salvare (max {MAX_RECORD_SECONDS}s).")
 
-        # Invio Embed con Pulsante (tramite followup perché abbiamo già risposto con "Connessione...")
         view = RecorderView(vc, sink, interaction, on_finish)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await interaction.edit_original_response(content=None, embed=embed, view=view)
 
 
 

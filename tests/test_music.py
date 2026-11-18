@@ -198,7 +198,7 @@ async def test_play_requires_voice(env):
 
 async def test_play_starts_then_queues(env):
     first = await play(env)
-    assert "Track caricata" in first.last and "t1" in first.last
+    assert "Traccia caricata" in first.last and "t1" in first.last
     vc = env.guild.voice_client
     assert vc.playing and env.cog.players[1].current.title == "t1"
 
@@ -375,5 +375,5 @@ async def test_other_cog_preempting_voice_client(env):
     await settle()
     vc.playing, vc.source = False, None
     it = await play(env)
-    assert "Track caricata" in it.last
+    assert "Traccia caricata" in it.last
     assert env.cog.players[1].current is not None and vc.playing

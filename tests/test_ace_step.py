@@ -245,6 +245,9 @@ async def test_expired_interaction_falls_back_to_the_channel(env):
     await env.cog.ace_step.callback(env.cog, it, "jazz", 30, None)
     content, kwargs = it.channel.sent[-1]
     assert kwargs["file"].fp.read() == AUDIO and kwargs["embed"].title == "🎵 Musica generata"
+    # un embed da solo non notifica nessuno: nel canale si cita chi aveva chiesto il brano (e solo lui)
+    assert content == it.user.mention
+    assert kwargs["allowed_mentions"].users == [it.user] and kwargs["allowed_mentions"].everyone is False
 
 
 # ------------------------------------------------------------ configurazione e registrazione

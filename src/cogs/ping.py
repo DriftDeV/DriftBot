@@ -10,9 +10,9 @@ class Ping(commands.Cog) :
     async def on_ready(self) :
         print("Ping Ready!")
     
-    @app_commands.command(name="ping")
+    @app_commands.command(name="ping", description="Controlla che il bot risponda")
     async def ping(self, interaction : discord.Interaction) :
-        await interaction.response.send_message(f"pong", ephemeral=True)
+        await interaction.response.send_message("pong", ephemeral=True)
 
 async def setup(bot) :
     await bot.add_cog(Ping(bot))
