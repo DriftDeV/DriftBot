@@ -1,0 +1,65 @@
+# DriftBot con Docker Compose (VPS, server, produzione).
+#
+#   docker compose up -d --build     # costruisce l'immagine e avvia il bot in background
+#   docker compose logs -f           # log del bot
+#   docker compose down              # ferma il bot (i dati restano nei volumi)
+#
+# Serve un file .env accanto a questo con almeno DISCORD_TOKEN (vedi README, sezione "Docker").
+# Default: PyTorch per CPU, che gira su qualsiasi VPS. Per la GPU vedi i blocchi commentati qui sotto
+# e la variabile TORCH_INDEX (README, sezione "Docker").
+
+services:
+  bot:
+    build:
+      context: .
+      args:
+        # CPU (default) | https://download.pytorch.org/whl/cu124 (NVIDIA) | https://download.pytorch.org/whl/rocm6.2.4 (AMD)
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    image: driftbot:latest
+    container_name: driftbot
+    restart: unless-stopped
+    init: true                      # chiude i processi figli (ffmpeg) e inoltra i segnali
+    stop_signal: SIGINT             # il bot chiude il database in modo pulito solo con SIGINT
+    stop_grace_period: 30s
+    env_file: .env                  # token e chiavi: non finiscono mai nell'immagine
+    environment:
+      # La dashboard dentro il container ascolta su tutte le interfacce, ma fuori resta solo su 127.0.0.1 (porta qui sotto).
+      # Si attiva solo se nel .env c'è DASHBOARD_PASSWORD. Dietro HTTPS metti anche DASHBOARD_COOKIE_SECURE=1 nel .env.
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: "8080"        # fisso: deve coincidere con la porta pubblicata qui sotto
+    ports:
+      - "127.0.0.1:8080:8080"       # per esporla mettila dietro un reverse proxy HTTPS (README); cambia solo il primo numero
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # per raggiungere ACE-Step / Ollama in esecuzione sull'host (ACESTEP_API_URL nel .env)
+    volumes:
+      - driftbot-data:/app/src/cogs/data           # database, suoni, voci clonate
+      - driftbot-rvc:/app/src/cogs/RVC/models      # modelli RVC
+      - driftbot-cache:/cache                      # modelli scaricati da Hugging Face e torch (evita di riscaricarli)
+    logging:                        # senza un limite i log riempiono il disco di un VPS
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ---- GPU NVIDIA (serve nvidia-container-toolkit sull'host, e TORCH_INDEX=.../cu124 nel .env o in shell) ----
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    # ---- GPU AMD / ROCm (solo Linux; TORCH_INDEX=.../rocm6.2.4) ----
+    # devices:
+    #   - /dev/kfd:/dev/kfd
+    #   - /dev/dri:/dev/dri
+    # group_add:                    # numeri dei gruppi dell'HOST: getent group video render
+    #   - "44"                      # video
+    #   - "105"                     # render
+    # (GPU consumer non supportate ufficialmente: aggiungi HSA_OVERRIDE_GFX_VERSION=10.3.0 o 11.0.0 nel .env)
+
+volumes:
+  driftbot-data:
+  driftbot-rvc:
+  driftbot-cache:

@@ -164,3 +164,58 @@ def test_the_gitignore_keeps_runtime_data_out_of_git():
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     for pattern in ("*.sqlite3", "src/cogs/data/*", "src/cogs/RVC/models/"):
         assert pattern in gitignore
+
+
+# ------------------------------------------------------------------------------------------ Docker
+
+DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+
+def test_markdown_links_to_files_in_the_repository_exist():
+    """README e docs/ rimandano l'uno all'altro: un link a un file inesistente è un difetto."""
+    for page in (ROOT / "README.md", ROOT / "docs" / "ai-music.md"):
+        for target in re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", page.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            assert (page.parent / target).exists(), f"{page.name} rimanda a {target}, che non esiste"
+
+
+def test_dockerignore_keeps_secrets_and_user_data_out_of_the_image():
+    for pattern in (".env", "src/cogs/data/", "src/cogs/RVC/models/", "venv/", ".venv/", ".git"):
+        assert pattern in DOCKERIGNORE, f".dockerignore deve escludere {pattern}"
+    assert ".env.*" in DOCKERIGNORE
+
+
+def test_dockerfile_copies_only_files_that_exist_and_runs_unprivileged():
+    for source in re.findall(r"^COPY (?!--from=)(?:--\S+ )*(\S+)", DOCKERFILE, flags=re.MULTILINE):
+        assert (ROOT / source).exists(), f"il Dockerfile copia {source}, che non esiste"
+    assert re.search(r"^USER bot$", DOCKERFILE, flags=re.MULTILINE)       # mai root
+    assert "STOPSIGNAL SIGINT" in DOCKERFILE                              # solo con SIGINT il bot chiude il database
+    assert 'CMD ["python", "src/main.py"]' in DOCKERFILE
+    assert (ROOT / "src" / "main.py").is_file()
+
+
+def test_dockerfile_installs_pytorch_before_the_rest_like_the_makefile():
+    """Su PyPI (Linux) c'è solo la build CUDA: PyTorch va installato prima, dall'indice scelto."""
+    assert DOCKERFILE.index("--index-url ${TORCH_INDEX}") < DOCKERFILE.index("RUN python scripts/install_deps.py")
+    # stesse versioni del Makefile: se cambiano lì, il Dockerfile va aggiornato
+    assert "ARG TORCH_VERSION=2.6.0" in DOCKERFILE and "ARG TORCHVISION_VERSION=0.21.0" in DOCKERFILE
+    assert "TORCH_VERSION := 2.6.0" in MAKEFILE and "TORCHVISION_VERSION := 0.21.0" in MAKEFILE
+
+
+def test_compose_volumes_match_the_dockerfile_and_the_dashboard_port_is_fixed():
+    volumes = re.search(r"^VOLUME \[(.+)\]$", DOCKERFILE, flags=re.MULTILINE).group(1)
+    for path in re.findall(r'"([^"]+)"', volumes):
+        assert f":{path}" in COMPOSE, f"docker-compose.yml non monta {path}"
+    assert 'DASHBOARD_PORT: "8080"' in COMPOSE and '"127.0.0.1:8080:8080"' in COMPOSE and "EXPOSE 8080" in DOCKERFILE
+    assert "stop_signal: SIGINT" in COMPOSE and "env_file: .env" in COMPOSE
+
+
+def test_the_readme_explains_the_docker_setup_with_files_that_exist():
+    for command in ("docker compose up -d --build", "docker compose logs"):
+        assert command in README
+    for name in ("Dockerfile", "docker-compose.yml", ".dockerignore"):
+        assert (ROOT / name).is_file()
+    assert "TORCH_INDEX" in README and "docker-compose.yml" in README

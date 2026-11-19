@@ -1,0 +1,44 @@
+# Fuori dall'immagine: segreti, dati degli utenti, ambienti locali e tutto ciò che non serve a far girare il bot.
+
+# Segreti: il token e le chiavi si passano a runtime (env_file / -e), mai dentro l'immagine
+.env
+.env.*
+
+# Dati e modelli: stanno nei volumi (database, suoni, voci clonate, modelli RVC)
+src/cogs/data/
+src/cogs/RVC/models/
+
+# Ambienti virtuali e cache locali
+venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+graphify-out/
+
+# Repository e CI
+.git
+.github
+.gitattributes
+.editorconfig
+
+# Test, documentazione di ricerca e script di setup per sviluppatori
+tests/
+reports/
+research_notes/
+setup-windows.ps1
+fedora-deps.sh
+Makefile
+uv.lock
+
+# Il contesto di build non deve contenere i file Docker stessi
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+*.log
