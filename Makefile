@@ -1,4 +1,4 @@
-.PHONY: help install install-torch install-dev venv clean run dashboard lint format type-check test pre-commit update
+.PHONY: help install install-torch install-project install-pkuseg install-dev venv clean run dashboard lint format type-check test pre-commit update
 
 PYTHON := python3.10
 VENV := venv
@@ -18,8 +18,9 @@ endif
 # Helper function to check if venv is active or create it
 CHECK_VENV = if [ "$(VENV_ACTIVE)" = "1" ]; then echo "Using active venv"; else $(MAKE) venv; fi
 
-# pip del venv attivo oppure di quello locale
+# pip e python del venv attivo oppure di quello locale
 PIP := $(if $(filter 1,$(VENV_ACTIVE)),pip,$(BIN)/pip)
+PY := $(if $(filter 1,$(VENV_ACTIVE)),python,$(BIN)/python)
 
 # --- GPU -------------------------------------------------------------------
 # make install GPU=cuda   -> NVIDIA (CUDA)
@@ -189,12 +190,26 @@ install:
 ifeq ($(VENV_ACTIVE),1)
 	@echo "✅ Virtual environment is already active"
 	$(MAKE) install-torch
-	pip install -e .
+	$(MAKE) install-pkuseg
+	$(MAKE) install-project
 else
 	@echo "📦 Creating virtual environment..."
 	$(MAKE) venv
-	$(BIN)/pip install -e .
+	$(MAKE) install-pkuseg
+	$(MAKE) install-project
 endif
+
+# pkuseg (richiesto da chatterbox-tts) si compila solo senza isolamento, cosi' vede numpy nel venv
+install-pkuseg:
+	$(PIP) install "numpy>=1.24.0,<2.0.0" "Cython>=0.29.32"
+	$(PIP) install pkuseg==0.0.25 --no-build-isolation
+
+# Dipendenze di pyproject.toml + il progetto in modalita' editable. Niente `pip install -e .`: rvc-python
+# (requests==2.31.0) e yt-dlp (requests>=2.32.2) sono in conflitto e pip lo rifiuta se li installa insieme;
+# scripts/install_deps.py li installa in due passi. INSTALL_ARGS="--extra dev --upgrade" passa opzioni allo script.
+install-project:
+	$(PY) scripts/install_deps.py $(INSTALL_ARGS)
+	$(PIP) install -e . --no-deps
 
 install-dev:
 	@# Verifica se python3.11 esiste, altrimenti installa le dipendenze
@@ -206,17 +221,13 @@ ifeq ($(VENV_ACTIVE),1)
 	@echo "✅ Virtual environment is already active"
 	pip install --upgrade pip setuptools wheel
 	$(MAKE) install-torch
-	pip install "numpy>=1.24.0,<2.0.0" "Cython>=0.29.32"
-	# Installiamo pkuseg senza isolamento così vede numpy nel venv
-	pip install pkuseg==0.0.25 --no-build-isolation
-	pip install -e ".[dev]"
+	$(MAKE) install-pkuseg
+	$(MAKE) install-project INSTALL_ARGS="--extra dev"
 else
 	@echo "🗳️  Installazione dipendenze e Pacchetti venv (DEV)"
 	$(MAKE) venv
-	$(BIN)/pip install "numpy>=1.24.0,<2.0.0" "Cython>=0.29.32"
-	# Installiamo pkuseg senza isolamento usando il binario del venv
-	$(BIN)/pip install pkuseg==0.0.25 --no-build-isolation
-	$(BIN)/pip install -e ".[dev]"
+	$(MAKE) install-pkuseg
+	$(MAKE) install-project INSTALL_ARGS="--extra dev"
 	@echo "✅ [DONE] Pacchetti installati con successo"
 endif
 
@@ -300,14 +311,7 @@ pre-commit: format lint type-check
 	@echo "Pre-commit checks passed!"
 
 update:
-ifeq ($(VENV_ACTIVE),1)
-	pip install --upgrade pip setuptools wheel
-	pip install -e . --upgrade
-	pip install -e ".[dev]" --upgrade
-else
-	$(BIN)/pip install --upgrade pip setuptools wheel
-	$(BIN)/pip install -e . --upgrade
-	$(BIN)/pip install -e ".[dev]" --upgrade
-endif
+	$(PIP) install --upgrade pip setuptools wheel
+	$(MAKE) install-project INSTALL_ARGS="--extra dev --upgrade"
 
 .DEFAULT_GOAL := help
