@@ -240,7 +240,7 @@ async def test_claude_needs_no_local_cleanup(anthropic_server):
 
 async def test_lyrics_writer_works_with_claude(anthropic_server):
     text = await LyricsWriter(anthropic_server.make()).write("ballata sul mare", 90, "en")
-    assert text.startswith("[verse]") and "[chorus]" in text
+    assert text.startswith("[Verse]") and "[Chorus]" in text
     request = anthropic_server.requests[0]["body"]
     assert "English" in request["system"] and "ballata sul mare" in request["messages"][0]["content"]
 
@@ -265,7 +265,7 @@ async def ollama():
 
 async def test_ollama_sends_the_documented_request_and_returns_clean_lyrics(ollama):
     text = await ollama.writer.write("ballata sul mare", 90, "it")
-    assert text.startswith("[verse]") and "[chorus]" in text
+    assert text.startswith("[Verse]") and "[Chorus]" in text
     body = ollama.chat_requests[0]
     assert body["model"] == "qwen2.5:7b" and body["stream"] is False
     assert body["keep_alive"] == 0                              # scarica subito dopo la risposta

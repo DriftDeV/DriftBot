@@ -68,15 +68,23 @@ class DashboardConfig:
     fail_delay: float = 0.4           # pausa dopo una password sbagliata
     max_failures: int = 5
     lockout: float = 300
+    no_password: bool = False         # solo con host locale: nessun login, la sessione parte da sola
     extra: dict = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env: Optional[dict] = None) -> "DashboardConfig":
         env = os.environ if env is None else env
+        truthy = lambda v: str(v).strip().lower() in ("1", "true", "yes", "si", "sì", "on")  # noqa: E731
+        host = env.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        no_password = truthy(env.get("DASHBOARD_NO_PASSWORD", ""))
         password = env.get("DASHBOARD_PASSWORD", "")
-        if not password:
+        if no_password:
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                raise ConfigError("DASHBOARD_NO_PASSWORD è ammesso solo con DASHBOARD_HOST locale (127.0.0.1).")
+            password = ""
+        elif not password:
             raise ConfigError("DASHBOARD_PASSWORD non impostata: la dashboard resta disattivata.")
-        if len(password) < MIN_PASSWORD_LENGTH:
+        elif len(password) < MIN_PASSWORD_LENGTH:
             raise ConfigError(f"DASHBOARD_PASSWORD troppo corta (minimo {MIN_PASSWORD_LENGTH} caratteri).")
         try:
             port = int(env.get("DASHBOARD_PORT", "8080"))
@@ -84,10 +92,10 @@ class DashboardConfig:
             raise ConfigError("DASHBOARD_PORT non è un numero.") from e
         if not 0 <= port <= 65535:
             raise ConfigError("DASHBOARD_PORT fuori intervallo.")
-        truthy = lambda v: str(v).strip().lower() in ("1", "true", "yes", "si", "sì", "on")  # noqa: E731
         return cls(
             password=password,
-            host=env.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            no_password=no_password,
+            host=host,
             port=port,
             cookie_secure=truthy(env.get("DASHBOARD_COOKIE_SECURE", "")),
             trust_proxy=truthy(env.get("DASHBOARD_TRUST_PROXY", "")),
@@ -354,8 +362,21 @@ async def index(request: web.Request) -> web.StreamResponse:
 
 
 async def session_info(request: web.Request) -> web.Response:
-    session = request.app[SESSIONS_KEY].get(request.cookies.get(COOKIE))
+    app = request.app
+    session = app[SESSIONS_KEY].get(request.cookies.get(COOKIE))
+    if session is None and app[CONFIG_KEY].no_password:
+        session = app[SESSIONS_KEY].create()
+        response = json_response({"authenticated": True, "csrf": session.csrf})
+        _set_session_cookie(response, app, session)
+        return response
     return json_response({"authenticated": session is not None, "csrf": session.csrf if session else None})
+
+
+def _set_session_cookie(response: web.Response, app: web.Application, session) -> None:
+    response.set_cookie(
+        COOKIE, session.token, max_age=int(app[CONFIG_KEY].session_ttl), httponly=True,
+        samesite="Strict", secure=app[CONFIG_KEY].cookie_secure, path="/",
+    )
 
 
 async def login(request: web.Request) -> web.Response:
@@ -374,10 +395,7 @@ async def login(request: web.Request) -> web.Response:
     limiter.success(ip)
     session = app[SESSIONS_KEY].create()
     response = json_response({"csrf": session.csrf})
-    response.set_cookie(
-        COOKIE, session.token, max_age=int(app[CONFIG_KEY].session_ttl), httponly=True,
-        samesite="Strict", secure=app[CONFIG_KEY].cookie_secure, path="/",
-    )
+    _set_session_cookie(response, app, session)
     await storage.log_action(app[DB_KEY], ACTOR, "login", ip)
     return response
 

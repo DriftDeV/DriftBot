@@ -15,6 +15,8 @@ from fake_servers import FakeAceStep, FakeAnthropic, FakeOllama
 from fakes import FakeGuild, FakeInteraction, make_channel
 from text_llm import ClaudeConfig, LLMConfig, OllamaConfig
 
+pytestmark = pytest.mark.usefixtures("instant_playback")
+
 
 @pytest.fixture
 async def chain():
@@ -42,7 +44,7 @@ async def chain():
 async def run(chain, prompt="ballata malinconica sul mare", durata=None, testo=None,
               lingua=None, strumentale=False, user_id=42):
     it = FakeInteraction(chain.guild, chain.channel, user_id=user_id)
-    await chain.cog.ace_step.callback(chain.cog, it, prompt, durata, testo, lingua, strumentale)
+    await chain.cog.ai_music.callback(chain.cog, it, prompt, "ace", durata, testo, lingua, strumentale)
     return it
 
 
@@ -60,19 +62,19 @@ async def test_lyrics_are_written_by_the_llm_and_used_by_acestep(chain):
     chain.ace.running_polls = 1                     # il brano non è pronto al primo controllo
     it = await run(chain)
     body = chain.ace.submitted[0]
-    assert body["lyrics"].startswith("[verse]") and "Luci di città" in body["lyrics"]
+    assert body["lyrics"].startswith("[Verse]") and "Luci di città" in body["lyrics"]
     assert body["vocal_language"] == "it"
 
     embed = final(it)["embed"]
     assert "Luci di città" in embed.description                        # il testo è mostrato all'utente
     assert "testo scritto dall'AI" in embed_fields(it)["Dettagli"]
     assert "⚠️ Nota" not in embed_fields(it)
-    assert final(it)["attachments"][0].fp.read()                        # e il brano è allegato
+    assert chain.guild.voice_client.played                              # e il brano è suonato in vocale
 
     user_message = chain.llm.chat_requests[0]["messages"][1]["content"]
-    assert "ballata malinconica sul mare" in user_message and "180 seconds" in user_message
+    assert "ballata malinconica sul mare" in user_message and "100 seconds" in user_message
     texts = [e.get("content") or "" for e in it.edits]
-    assert any("scrivendo il testo" in t for t in texts) and any("componendo" in t for t in texts)
+    assert any("preparando il testo" in t for t in texts) and any("componendo" in t for t in texts)
 
 
 async def test_llm_is_unloaded_before_acestep_starts(chain):
@@ -99,15 +101,46 @@ async def test_acestep_still_runs_if_the_llm_cannot_be_unloaded(chain):
     assert final(it)["embed"].title == "🎵 Musica generata"             # non resta bloccato per sempre
 
 
-async def test_given_lyrics_or_instrumental_skip_the_llm(chain):
-    it = await run(chain, testo="[verse]\nil mio testo\nsecondo verso")
-    assert chain.ace.submitted[-1]["lyrics"].startswith("[verse]\nil mio testo")
-    assert "con testo" in embed_fields(it)["Dettagli"]
+HEADER = ("CAPTION: Intimate acoustic folk ballad, fingerpicked guitar, soft piano, warm female voice, airy and tender\n"
+          "BPM: 78\nKEY: D major\nTIME: 3\n\n")
+USER_LYRICS = "il mio testo\nsecondo verso\n\nrefrain finale\nsempre uguale"
 
+
+async def test_instrumental_skips_the_llm(chain):
     it = await run(chain, strumentale=True)
     assert chain.ace.submitted[-1]["lyrics"] == "[Instrumental]"
     assert "strumentale" in embed_fields(it)["Dettagli"]
     assert chain.llm.chat_requests == [] and "llm_chat_start" not in chain.events
+
+
+async def test_user_lyrics_get_caption_metadata_and_tags_but_keep_their_words(chain):
+    chain.llm.content = HEADER + "[Verse]\nil mio testo\nsecondo verso\n\n[Chorus - tender]\nrefrain finale\nsempre uguale"
+    it = await run(chain, prompt="una ninna nanna dolce", testo=USER_LYRICS)
+    body = chain.ace.submitted[-1]
+    assert body["lyrics"] == "[Verse]\nil mio testo\nsecondo verso\n\n[Chorus - tender]\nrefrain finale\nsempre uguale"
+    assert body["prompt"].startswith("Intimate acoustic folk ballad")
+    assert (body["bpm"], body["key_scale"], body["time_signature"]) == (78, "D Major", "3")
+    assert "con testo" in embed_fields(it)["Dettagli"] and "⚠️ Nota" not in embed_fields(it)
+    sent = chain.llm.chat_requests[0]["messages"]
+    assert "never translate" in sent[0]["content"].lower() or "Never translate" in sent[0]["content"]
+    assert USER_LYRICS in sent[1]["content"]
+
+
+async def test_if_the_llm_touches_the_words_the_original_text_is_kept(chain):
+    chain.llm.content = HEADER + "[Verse]\nil mio testo bellissimo\nsecondo verso\n\n[Chorus]\nrefrain finale\nsempre uguale"
+    await run(chain, testo=USER_LYRICS)
+    body = chain.ace.submitted[-1]
+    assert body["lyrics"] == USER_LYRICS                         # parole e righe identiche, senza i tag dell'LLM
+    assert body["bpm"] == 78 and body["prompt"].startswith("Intimate acoustic")   # caption e metadati restano
+
+
+async def test_user_lyrics_survive_an_llm_failure_and_are_not_turned_instrumental(chain):
+    chain.llm.chat_status = 500
+    it = await run(chain, prompt="ballata sul mare", testo=USER_LYRICS)
+    body = chain.ace.submitted[-1]
+    assert body["lyrics"] == USER_LYRICS and body["prompt"] == "ballata sul mare"
+    assert not {"bpm", "key_scale", "time_signature"} & set(body)
+    assert "Uso il tuo prompt" in embed_fields(it)["⚠️ Nota"] and "con testo" in embed_fields(it)["Dettagli"]
 
 
 async def test_lyrics_and_instrumental_together_are_rejected(chain):
@@ -123,11 +156,32 @@ async def test_llm_disabled_means_instrumental(chain):
     assert "⚠️ Nota" not in embed_fields(it)
 
 
+async def test_caption_and_metadata_from_the_llm_reach_acestep(chain):
+    chain.llm.content = (
+        "CAPTION: Western ballad, fingerpicked acoustic guitar, harmonica, warm male baritone, dusty\n"
+        "BPM: 92\nKEY: G major\nTIME: 4\n\n[Intro]\n\n[Verse]\nluci di città\npasso lento\n\n[Chorus]\ncanto con te\nresta qui"
+    )
+    it = await run(chain, prompt="una canzone su un cowboy")
+    body = chain.ace.submitted[0]
+    assert body["prompt"].startswith("Western ballad, fingerpicked")      # caption sonora, non la richiesta grezza
+    assert (body["bpm"], body["key_scale"], body["time_signature"]) == (92, "G Major", "4")
+    assert "CAPTION" not in body["lyrics"] and body["lyrics"].startswith("[Intro]")
+    assert body["use_cot_language"] is False
+    assert {f.name: f.value for f in final(it)["embed"].fields}["Prompt"] == "una canzone su un cowboy"   # all'utente resta la sua frase
+
+
+async def test_without_a_usable_header_the_user_prompt_and_server_metadata_are_kept(chain):
+    await run(chain, prompt="ballata malinconica sul mare")
+    body = chain.ace.submitted[0]
+    assert body["prompt"] == "ballata malinconica sul mare"
+    assert not {"bpm", "key_scale", "time_signature"} & set(body)
+
+
 # ------------------------------------------------------------ durata e lingua
 
-async def test_default_duration_is_the_maximum(chain):
+async def test_default_duration_is_100_seconds_not_the_maximum(chain):
     await run(chain, durata=None)
-    assert chain.ace.submitted[-1]["audio_duration"] == 180
+    assert chain.ace.submitted[-1]["audio_duration"] == 100
 
     chain.config.max_seconds = 90
     await run(chain, durata=None)
@@ -156,7 +210,7 @@ async def test_messy_llm_output_is_cleaned_before_reaching_acestep(chain):
                          "passo lento\n\n**Ritornello**\ncanto con te\nresta qui")
     await run(chain)
     lyrics = chain.ace.submitted[0]["lyrics"]
-    assert lyrics.startswith("[verse]") and "[chorus]" in lyrics
+    assert lyrics.startswith("[Verse]") and "[Chorus]" in lyrics
     assert not any(junk in lyrics for junk in ("Certo", "think", "**", "##"))
 
 
@@ -271,7 +325,8 @@ async def test_claude_writes_the_lyrics_when_the_key_is_present(chain_claude):
     it = await run(chain_claude)
 
     body = chain_claude.ace.submitted[0]
-    assert body["lyrics"] == CLAUDE_LYRICS and body["vocal_language"] == "it"
+    assert body["lyrics"] == CLAUDE_LYRICS.replace("[verse]", "[Verse]").replace("[chorus]", "[Chorus]")
+    assert body["vocal_language"] == "it"
     assert "Onde di Claude" in final(it)["embed"].description
     assert "testo scritto dall'AI (Claude claude-opus-5-5)" in embed_fields(it)["Dettagli"]
     assert any("Claude claude-opus-5-5" in (e.get("content") or "") for e in it.edits)
@@ -280,7 +335,7 @@ async def test_claude_writes_the_lyrics_when_the_key_is_present(chain_claude):
     assert chain_claude.llm.chat_requests == [] and chain_claude.llm.ps_calls == 0
     assert chain_claude.events.index("claude_call") < chain_claude.events.index("ace_release")
     request = chain_claude.claude.requests[0]["body"]
-    assert "ballata malinconica sul mare" in request["messages"][0]["content"] and "180 seconds" in request["messages"][0]["content"]
+    assert "ballata malinconica sul mare" in request["messages"][0]["content"] and "100 seconds" in request["messages"][0]["content"]
 
 
 async def test_without_the_key_the_local_flow_is_used(chain_claude):
@@ -330,10 +385,17 @@ async def test_claude_failure_gives_an_instrumental_track_and_never_falls_back_t
     assert chain_claude.llm.chat_requests == [] and chain_claude.llm.ps_calls == 0
 
 
-async def test_no_paid_call_when_lyrics_are_not_needed(chain_claude):
-    await run(chain_claude, testo="[verse]\nil mio testo\nsecondo verso")
+async def test_no_paid_call_when_the_llm_is_not_needed(chain_claude):
     await run(chain_claude, strumentale=True)
     chain_claude.config.llm.enabled = False
+    await run(chain_claude, testo="[verse]\nil mio testo\nsecondo verso")      # LLM spento: testo identico
     await run(chain_claude)
     assert chain_claude.claude.requests == [] and chain_claude.events.count("claude_call") == 0
-    assert [b["lyrics"] for b in chain_claude.ace.submitted][1:] == ["[Instrumental]", "[Instrumental]"]
+    assert [b["lyrics"] for b in chain_claude.ace.submitted] == [
+        "[Instrumental]", "[verse]\nil mio testo\nsecondo verso", "[Instrumental]"]
+
+
+async def test_user_lyrics_cost_one_claude_call_and_stay_unchanged(chain_claude):
+    await run(chain_claude, testo="[verse]\nil mio testo\nsecondo verso")
+    assert len(chain_claude.claude.requests) == 1
+    assert chain_claude.ace.submitted[-1]["lyrics"] == "[verse]\nil mio testo\nsecondo verso"   # Claude ne ha risposto un altro

@@ -39,7 +39,10 @@ def enable_dave_decrypt(vc: "voice_recv.VoiceRecvClient") -> None:
     """
     if davey is None:
         return
-    decryptor = vc._reader.decryptor
+    reader = getattr(vc, "_reader", None)
+    if reader is None:
+        return
+    decryptor = reader.decryptor
     transport_decrypt = decryptor.decrypt_rtp
 
     def decrypt_rtp(packet):
@@ -85,7 +88,7 @@ class UserSpecificSink(voice_recv.AudioSink):
 
         try:
             # Scrive solo se l'audio proviene dall'utente target
-            if user == self.target_user:
+            if user is not None and user.id == self.target_user.id:
                 self.file.writeframes(data.pcm)
                 self.bytes_written += len(data.pcm)
         except (ValueError, AttributeError, OSError):
@@ -317,7 +320,7 @@ class Create_Speaker(commands.Cog):
         channel = interaction.user.voice.channel
 
         # Verifica se il target è nello stesso canale
-        if target_user not in channel.members:
+        if all(m.id != target_user.id for m in channel.members):
              await interaction.response.send_message(f"❌ L'utente {target_user.mention} non è nel tuo canale vocale!", ephemeral=True)
              return
 

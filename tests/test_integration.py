@@ -15,6 +15,7 @@ async def bot(isolated_data, monkeypatch):
     import main
 
     monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    monkeypatch.setenv("DASHBOARD_NO_PASSWORD", "")   # il .env reale non deve filtrare nel test
     monkeypatch.setenv("DASHBOARD_PORT", "0")
     bot = main.MyBot()
 

@@ -27,6 +27,7 @@ COGS_DIR = Path(__file__).parent / "cogs"
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True  # Necessario per voice channels
+intents.members = True       # Privilegiato: senza, guild.get_member() è None e /new-speaker non registra né elenca nessuno
 intents.guilds = True
 
 
@@ -189,7 +190,7 @@ def run() -> None:
         # Il bot chiede Message Content Intent (vedi `intents` sopra): va attivato anche nel portale
         sys.exit(
             "❌ Intent privilegiato non abilitato: nel Discord Developer Portal apri la tua applicazione, "
-            "vai in Bot > Privileged Gateway Intents e attiva «Message Content Intent» (vedi README)."
+            "vai in Bot > Privileged Gateway Intents e attiva «Message Content Intent» e «Server Members Intent» (vedi README)."
         )
 
 

@@ -223,86 +223,19 @@ async def test_track_end_advances_then_idles(env):
     env.cog._cancel_idle(player)
 
 
-async def test_skip(env):
+async def test_upcoming_names_the_next_track_and_clear_resets_the_guild(env):
     await play(env)
-    it = FakeInteraction(env.guild, env.channel)
-    assert await env.cog.skip_if_active(it) is True
-    assert "Non ci sono altre canzoni" in it.last  # coda vuota: la traccia corrente continua
-    assert env.guild.voice_client.playing
-
+    assert env.cog.upcoming(env.guild) is None              # coda vuota
     await play(env)
-    it = FakeInteraction(env.guild, env.channel)
-    assert await env.cog.skip_if_active(it) is True
-    assert "t2" in it.last
-    await settle()
-    assert env.cog.players[1].current.title == "t2"
-
-
-async def test_skip_not_handled_without_music(env):
-    it = FakeInteraction(env.guild, env.channel)
-    assert await env.cog.skip_if_active(it) is False
-    assert it.sent == []  # l'interazione resta libera per l'AI cover
-
-
-async def test_skip_wrong_channel(env):
-    await play(env)
-    other = FakeInteraction(env.guild, SimpleNamespace(name="other"))
-    assert await env.cog.skip_if_active(other) is True
-    assert "stesso canale" in other.last
-
-
-async def test_pause_resume(env):
-    await play(env)
-    vc = env.guild.voice_client
-
-    it = FakeInteraction(env.guild, env.channel)
-    await env.cog.pause.callback(env.cog, it)
-    assert vc.paused and "pausa" in it.last
-
-    it = FakeInteraction(env.guild, env.channel)
-    await env.cog.resume.callback(env.cog, it)
-    assert not vc.paused and "riproduzione" in it.last
-
-    it = FakeInteraction(env.guild, env.channel)
-    await env.cog.resume.callback(env.cog, it)
-    assert "non è in pausa" in it.last
-
-
-async def test_setvolume_applies_live(env):
-    await play(env)
-    it = FakeInteraction(env.guild, env.channel)
-    await env.cog.setvolume.callback(env.cog, it, 40)
-    player = env.cog.players[1]
-    assert player.volume == 40 and player.source.volume == pytest.approx(0.4)
-    assert "40" in it.last
-
-
-async def test_volume_carries_to_next_track(env):
-    await play(env)
-    await play(env)
-    await env.cog.setvolume.callback(env.cog, FakeInteraction(env.guild, env.channel), 25)
-    env.guild.voice_client.stop()
-    await settle()
-    assert env.cog.players[1].source.volume == pytest.approx(0.25)
-
-
-async def test_stop_clears_everything(env):
-    await play(env)
-    await play(env)
-    vc = env.guild.voice_client
-    it = FakeInteraction(env.guild, env.channel)
-    await env.cog.stop.callback(env.cog, it)
-    await settle()
-    assert "stoppata" in it.last
+    assert env.cog.upcoming(env.guild) == "**t2** di **a2**"
+    env.cog.clear(1)
     assert 1 not in env.cog.players
-    assert not vc.connected and not vc.playing
 
 
-async def test_controls_without_music(env):
-    for cmd in (env.cog.pause, env.cog.resume, env.cog.stop):
-        it = FakeInteraction(env.guild, env.channel)
-        await cmd.callback(env.cog, it)
-        assert "Non sto riproducendo" in it.last
+async def test_music_uses_the_guild_volume_from_the_playback_cog(env):
+    env.cog.bot.get_cog = lambda name: SimpleNamespace(volumes={1: 30}) if name == "Playback" else None
+    await play(env)
+    assert env.cog.players[1].source.volume == pytest.approx(0.3)
 
 
 async def test_play_refuses_when_other_audio_is_playing(env):
@@ -361,10 +294,8 @@ async def test_other_cog_preempting_voice_client(env):
 
     vc.play(FakeSource("ai-cover"))  # un altro cog sostituisce la sorgente (nessun `after` nostro)
 
-    # /skip non è più nostro: deve lasciarlo all'AI cover senza toccare l'interazione
-    it = FakeInteraction(env.guild, env.channel)
-    assert await env.cog.skip_if_active(it) is False
-    assert it.sent == []
+    # la traccia in coda non è "in arrivo": a suonare ora è un altro cog
+    assert env.cog.upcoming(env.guild) is None
 
     # /play mentre l'altro audio suona viene rifiutato, non accodato nel vuoto
     it = await play(env)

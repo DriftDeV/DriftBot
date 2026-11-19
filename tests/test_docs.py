@@ -139,8 +139,8 @@ def test_normal_start_and_ctrl_c_do_not_exit_with_errors(run_main):
 def test_the_requested_intents_are_the_documented_ones():
     """Il README dice di attivare Message Content Intent perché il bot lo richiede: se cambia, va aggiornato."""
     assert main.intents.message_content is True and main.intents.voice_states and main.intents.guilds
-    assert not main.intents.members and not main.intents.presences          # gli altri intent privilegiati non servono
-    assert "Message Content Intent" in README
+    assert main.intents.members and not main.intents.presences   # members: voice_recv risolve gli utenti con get_member()
+    assert "Message Content Intent" in README and "Server Members Intent" in README
 
 
 # ------------------------------------------------------------------------------------ dashboard

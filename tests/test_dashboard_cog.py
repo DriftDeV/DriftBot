@@ -21,8 +21,11 @@ async def db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def env(monkeypatch):
-    for name in ("DASHBOARD_PASSWORD", "DASHBOARD_HOST", "DASHBOARD_PORT", "DASHBOARD_IN_BOT", "DASHBOARD_COOKIE_SECURE"):
+    for name in ("DASHBOARD_HOST", "DASHBOARD_PORT", "DASHBOARD_IN_BOT", "DASHBOARD_COOKIE_SECURE"):
         monkeypatch.delenv(name, raising=False)
+    # vuoti ma presenti: load_dotenv() non sovrascrive, quindi il .env reale non filtra nel test
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "")
+    monkeypatch.setenv("DASHBOARD_NO_PASSWORD", "")
     return monkeypatch
 
 
@@ -109,3 +112,13 @@ def test_standalone_runner_reports_config_errors(env, capsys):
     with pytest.raises(SystemExit) as exc:
         dashboard_main.run()
     assert "DASHBOARD_PASSWORD" in str(exc.value)
+
+
+def test_no_password_mode_only_on_loopback_and_auto_session():
+    from dashboard.app import ConfigError, DashboardConfig
+    cfg = DashboardConfig.from_env({"DASHBOARD_NO_PASSWORD": "1"})
+    assert cfg.no_password and cfg.password == ""
+    with pytest.raises(ConfigError):
+        DashboardConfig.from_env({"DASHBOARD_NO_PASSWORD": "1", "DASHBOARD_HOST": "0.0.0.0"})
+    with pytest.raises(ConfigError):
+        DashboardConfig.from_env({})

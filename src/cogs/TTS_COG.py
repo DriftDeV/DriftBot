@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from contextlib import nullcontext
 import tempfile
 import uuid
 from datetime import datetime
@@ -54,6 +55,7 @@ class TTSCog(commands.Cog):
         self._model_lock = asyncio.Lock()
         self._generate_lock = asyncio.Lock()  # una sola generazione alla volta sulla GPU
         self._init_task: Optional[asyncio.Task] = None
+        self._released = False      # modello scaricato apposta (per ACE-Step): si ricarica al prossimo uso
 
         # Salvo torch.load originale PRIMA di un eventuale patch (ripristinato in cog_unload)
         self.original_torch_load = torch.load if torch is not None else None
@@ -71,6 +73,25 @@ class TTSCog(commands.Cog):
             self._torch_load_patched = False
         self.model = None
         gpu_utils.free_gpu_memory()
+
+    async def release_gpu(self) -> None:
+        """
+        Scarica il modello dalla VRAM (lo chiede ACE-Step, che con questo in memoria non ci sta).
+        Si ricarica da solo al prossimo /tts-ai. Chi chiama deve già tenere il `gpu_lock` di ACE-Step.
+        """
+        if self._init_task is not None and not self._init_task.done():
+            await asyncio.gather(self._init_task, return_exceptions=True)    # caricamento iniziale in corso
+        if self.model is not None:
+            self.model, self._released = None, True
+            gpu_utils.free_gpu_memory()
+
+    async def _reload_model(self, ace) -> None:
+        if ace is not None:
+            await ace.release_gpu()         # ACE-Step (se avviato dal bot) lascia la VRAM
+        self.log("Ricarico il modello TTS in VRAM...", "PROCESS")
+        async with self._model_lock:
+            self.model = await asyncio.to_thread(self._init_model_sync)
+        self._released = False
 
     def log(self, message: str, level: str = "INFO") -> None:
         """Log messages with timestamp and emoji."""
@@ -159,7 +180,10 @@ class TTSCog(commands.Cog):
         """
         try:
             self.log(f"Generating audio for speaker: {speaker_name}", "PROCESS")
-            async with self._generate_lock:
+            ace = getattr(self.bot, "get_cog", lambda name: None)("AceStepMusic")
+            async with self._generate_lock, (ace.gpu_lock if ace is not None else nullcontext()):
+                if self.model is None:
+                    await self._reload_model(ace)
                 await asyncio.to_thread(self._generate_sync, text, output_audio, target_audio, language)
             self.log(f"Audio generated successfully for {speaker_name}", "SUCCESS")
             return None
@@ -205,7 +229,7 @@ class TTSCog(commands.Cog):
         """Genera e riproduce un audio TTS nel canale vocale dell'utente."""
         # Controlli preliminari: tutti PRIMA del defer. Dopo un defer() pubblico Discord ignora
         # `ephemeral`, quindi solo così gli errori restano visibili a chi ha lanciato il comando.
-        if self.model is None:
+        if self.model is None and not self._released:
             await interaction.response.send_message(
                 "❌ Il sistema TTS non è pronto: controlla la console del bot.",
                 ephemeral=True,

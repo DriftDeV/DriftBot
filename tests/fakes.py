@@ -36,6 +36,12 @@ class FakeVC:
         self.playing, self.paused, self.after, self.source = True, False, after, source
         self.played.append(source)
 
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
     def stop(self):
         was_playing = self.playing
         self.playing = self.paused = False
@@ -54,6 +60,9 @@ class FakeGuild:
     def __init__(self, guild_id=1):
         self.id = guild_id
         self.voice_client = None
+
+    def get_member(self, user_id):
+        return None
 
 
 def make_channel(guild, name="vc", fail_connect=False):

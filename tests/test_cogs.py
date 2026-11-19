@@ -823,6 +823,26 @@ async def test_tts_generation_does_not_block_the_event_loop(tts, tmp_path):
     assert tts.cog.model.thread is not threading.main_thread()     # prima girava dentro l'event loop
 
 
+async def test_tts_model_is_released_for_acestep_and_reloaded_on_next_use(tts, tmp_path, monkeypatch):
+    events = []
+
+    class FakeAce:
+        gpu_lock = asyncio.Lock()
+
+        async def release_gpu(self):
+            events.append("ace_released")
+
+    tts.cog.bot.get_cog = lambda name: FakeAce() if name == "AceStepMusic" else None
+    monkeypatch.setattr(tts.cog, "_init_model_sync", lambda: events.append("loaded") or FakeModel())
+
+    await tts.cog.release_gpu()
+    assert tts.cog.model is None and tts.cog._released          # VRAM libera per ACE-Step
+    out = tmp_path / "o.wav"
+    assert await tts.cog.generate_audio("ciao", str(out), "ref.wav", "Ref", "it") is None
+    assert events == ["ace_released", "loaded"] and out.exists()   # prima ACE lascia la GPU, poi si ricarica
+    assert tts.cog.model is not None and not tts.cog._released
+
+
 async def test_tts_generation_errors_are_mapped(tts, tmp_path):
     tts.cog.model = FakeModel(RuntimeError("CUDA out of memory"))
     msg = await tts.cog.generate_audio("ciao", str(tmp_path / "o.wav"), "r", "Ref", "it")
@@ -923,3 +943,13 @@ async def test_tts_cog_loads_without_torch_or_chatterbox(tts, monkeypatch):
     tts.cog.model = None
     await tts.cog._async_init_model()                 # solo un log, nessuna eccezione
     assert tts.cog.model is None
+
+
+def test_sink_records_only_the_target_by_id_and_ignores_unknown_speakers(tmp_path):
+    sink = cs.UserSpecificSink(str(tmp_path / "a.wav"), SimpleNamespace(id=1))
+    pcm = SimpleNamespace(pcm=b"\0" * 3840)
+    sink.write(SimpleNamespace(id=1), pcm)   # istanza diversa, stesso id: va registrato
+    sink.write(SimpleNamespace(id=2), pcm)
+    sink.write(None, pcm)                    # ssrc non ancora associato a un utente
+    sink.cleanup()
+    assert sink.bytes_written == 3840

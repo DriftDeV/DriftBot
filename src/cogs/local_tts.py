@@ -1,9 +1,10 @@
 """
-TTS con la voce «Giorgio» di Amazon Polly — per chi non può parlare in quel momento.
+TTS con la voce «Giorgio» installata sul PC — per chi non può parlare in quel momento.
 
 `/tts testo:<cosa dire>` fa leggere il testo dal bot nel canale vocale dell'utente con la voce italiana
-Giorgio di Amazon Polly. Pensato per chi è in un posto dove non può parlare, ha il microfono rotto, o non
-può proprio parlare: scrive e il bot parla al suo posto. (Il TTS ad AI con le voci clonate è `/tts-ai`.)
+Giorgio, sintetizzata in locale con pyttsx3 (nessun servizio esterno, nessun costo, il testo non lascia il PC).
+Pensato per chi è in un posto dove non può parlare, ha il microfono rotto, o non può proprio parlare: scrive e
+il bot parla al suo posto. (Il TTS ad AI con le voci clonate è `/tts-ai`.)
 
 Comportamento:
   - il testo viene mostrato anche nel canale (chi ascolta e chi scrive vedono la stessa cosa);
@@ -12,31 +13,22 @@ Comportamento:
   - il bot esce dalla vocale dopo un minuto di silenzio;
   - se sta già riproducendo altro audio (musica, AI cover...) lo dice invece di interromperlo.
 
-Polly è un servizio a pagamento (a carattere) e il testo viene inviato ad AWS. Per contenere la spesa:
-  - tetto giornaliero di caratteri (TTS_DAILY_CHARS, default 50000, 0 = illimitato; si azzera a mezzanotte UTC
-    e al riavvio del bot);
-  - cache delle frasi già sintetizzate ("sì", "no", "ciao"...): ripeterle non costa nulla ed è istantaneo;
-  - il testo viene inviato come testo semplice, mai come SSML (nessuna iniezione di markup).
-
-Configurazione (file .env):
-  AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY    credenziali AWS con il permesso polly:SynthesizeSpeech
-  AWS_REGION                                    default eu-central-1 (anche AWS_DEFAULT_REGION)
-  POLLY_ENGINE                                  standard (default), neural, long-form o generative
-  TTS_DAILY_CHARS                               tetto giornaliero di caratteri
-
-`boto3` è importato solo quando serve: senza la libreria il bot parte lo stesso e /tts spiega cosa manca.
+La voce si cerca per nome («Giorgio») tra quelle installate nel sistema operativo. Se non c'è, /tts lo dice e
+nel log compare l'elenco delle voci disponibili. `pyttsx3` è importato solo quando serve: senza la libreria il
+bot parte lo stesso e /tts spiega cosa manca.
 """
 
 import asyncio
 import logging
 import os
 import re
+import importlib.util
 import tempfile
+import threading
 import unicodedata
 import uuid
-from collections import OrderedDict, deque
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -53,45 +45,13 @@ MAX_PER_USER = 3            # messaggi in coda per utente
 COOLDOWN_SECONDS = 3        # un /tts ogni tot secondi per utente
 IDLE_TIMEOUT = 60           # secondi di silenzio prima di lasciare la vocale
 MAX_PLAY_SECONDS = 120      # un singolo messaggio non può parlare più di così
-CACHE_MAX_ITEMS = 64        # frasi tenute in cache
-CACHE_MAX_BYTES = 8 * 1024 * 1024
-CONFIG_CHECK_TTL = 30       # secondi in cui si ricorda l'esito del controllo delle credenziali
 
-VOICE_ID = "Giorgio"
-LANGUAGE_CODE = "it-IT"
-ENGINES = ("standard", "neural", "long-form", "generative")
-DEFAULT_REGION = "eu-central-1"
-DEFAULT_DAILY_CHARS = 50000
+VOICE_NAME = "Giorgio"
+RATE = 175                  # parole al minuto (pyttsx3: default ~200)
 
 
 class SpeechError(Exception):
-    """Errore atteso nella sintesi, con un messaggio adatto a essere mostrato all'utente (mai chiavi o dettagli AWS)."""
-
-
-# ----------------------------------------------------------------------------- configurazione
-
-@dataclass
-class PollyConfig:
-    region: str = DEFAULT_REGION
-    engine: str = "standard"
-    daily_chars: int = DEFAULT_DAILY_CHARS     # 0 = illimitato
-    timeout: float = 15
-    max_attempts: int = 2                      # boto3 ripete da solo le richieste fallite per errori transitori
-    endpoint_url: str = ""                     # facoltativo (test, proxy, endpoint VPC)
-
-    @classmethod
-    def from_env(cls) -> "PollyConfig":
-        engine = os.getenv("POLLY_ENGINE", "").strip().lower() or cls.engine
-        if engine not in ENGINES:
-            log.warning("POLLY_ENGINE=%r non valido: uso %s", engine, cls.engine)
-            engine = cls.engine
-        try:
-            daily = int(os.getenv("TTS_DAILY_CHARS", DEFAULT_DAILY_CHARS))
-        except ValueError:
-            log.warning("TTS_DAILY_CHARS non è un intero valido: uso %s", DEFAULT_DAILY_CHARS)
-            daily = DEFAULT_DAILY_CHARS
-        region = os.getenv("AWS_REGION", "").strip() or os.getenv("AWS_DEFAULT_REGION", "").strip() or cls.region
-        return cls(region=region, engine=engine, daily_chars=max(0, daily))
+    """Errore atteso nella sintesi, con un messaggio adatto a essere mostrato all'utente."""
 
 
 # --------------------------------------------------------------------------------------- testo
@@ -141,197 +101,48 @@ def is_readable(text: str) -> bool:
 
 # -------------------------------------------------------------------------------------- motore
 
-# Codici di errore di Polly/AWS -> messaggio per l'utente
-_AUTH_ERRORS = {
-    "UnrecognizedClientException", "InvalidSignatureException", "InvalidClientTokenId", "SignatureDoesNotMatch",
-    "AccessDeniedException", "AccessDenied", "ExpiredTokenException", "ExpiredToken", "IncompleteSignature",
-    "MissingAuthenticationToken", "AuthFailure", "InvalidAccessKeyId",
-}
-_THROTTLE_ERRORS = {
-    "ThrottlingException", "Throttling", "TooManyRequestsException", "RequestLimitExceeded", "LimitExceededException",
-}
-_SERVICE_ERRORS = {"ServiceFailureException", "ServiceUnavailable", "InternalFailure", "InternalServerError"}
+class LocalEngine:
+    """Sintesi con la voce Giorgio installata sul PC (pyttsx3: SAPI5 su Windows, espeak su Linux, NSSpeech su macOS)."""
 
-
-class PollyEngine:
-    """Sintesi con Amazon Polly (SDK ufficiale boto3, in un thread) con cache e tetto giornaliero di caratteri."""
-
-    def __init__(self, config: PollyConfig):
-        self.config = config
-        self._client = None
-        self._cache: "OrderedDict[str, bytes]" = OrderedDict()
-        self._cache_bytes = 0
-        self._day: Optional[str] = None
-        self._spent = 0
-        self._checked_at: Optional[float] = None
-        self._problem: Optional[str] = None
-
-    # ------------------------------------------------------------------ configurazione
-
-    @staticmethod
-    def _import_boto():
-        try:
-            import boto3
-            import botocore.config
-            import botocore.exceptions
-        except ImportError as e:
-            raise SpeechError("La libreria `boto3` non è installata (`pip install boto3`).") from e
-        return boto3, botocore
-
-    def _problem_sync(self) -> Optional[str]:
-        try:
-            boto3, _ = self._import_boto()
-        except SpeechError as e:
-            return str(e)
-        # get_credentials() può leggere file e interrogare i metadati di EC2: va fatto fuori dall'event loop
-        if boto3.session.Session().get_credentials() is None:
-            return (
-                "Mancano le credenziali AWS: imposta AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY nel file .env "
-                "(vedi README)."
-            )
-        return None
+    _lock = threading.Lock()                # pyttsx3 non è pensato per usi concorrenti
 
     async def problem(self) -> Optional[str]:
-        """Perché /tts non può funzionare (libreria o credenziali mancanti), oppure None. Il risultato si ricorda per poco."""
-        # Si ricorda anche l'esito NEGATIVO: senza credenziali boto3 può interrogare i metadati di EC2
-        # (secondi di attesa) e /tts deve rispondere entro 3 secondi.
-        loop = asyncio.get_running_loop()
-        if self._checked_at is None or loop.time() - self._checked_at > CONFIG_CHECK_TTL:
-            self._problem = await asyncio.to_thread(self._problem_sync)
-            self._checked_at = loop.time()
-        return self._problem
+        """Perché /tts non può funzionare (libreria mancante), oppure None."""
+        if importlib.util.find_spec("pyttsx3") is None:
+            return "La libreria `pyttsx3` non è installata (`pip install pyttsx3`)."
+        return None
 
-    def _get_client(self):
-        if self._client is None:
-            boto3, botocore = self._import_boto()
-            kwargs = {
-                "region_name": self.config.region,
-                "config": botocore.config.Config(
-                    connect_timeout=5,
-                    read_timeout=self.config.timeout,
-                    retries={"max_attempts": self.config.max_attempts, "mode": "standard"},
-                ),
-            }
-            if self.config.endpoint_url:
-                kwargs["endpoint_url"] = self.config.endpoint_url
-            # Sessione propria (non quella globale di boto3): le credenziali si risolvono per questo motore e
-            # non restano in uno stato condiviso con altro codice
-            self._client = boto3.session.Session().client("polly", **kwargs)
-        return self._client
+    async def synthesize(self, text: str, path: str) -> None:
+        """Scrive in `path` un WAV con la voce di Giorgio. Solleva SpeechError per ogni problema."""
+        await asyncio.to_thread(self._synthesize_sync, text, path)
 
-    # ------------------------------------------------------------------ tetto di spesa
-
-    def _roll_day(self) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if today != self._day:
-            self._day, self._spent = today, 0
-
-    def remaining(self) -> Optional[int]:
-        """Caratteri ancora disponibili oggi, oppure None se non c'è un tetto."""
-        if self.config.daily_chars <= 0:
-            return None
-        self._roll_day()
-        return max(0, self.config.daily_chars - self._spent)
-
-    # ------------------------------------------------------------------ cache
-
-    def _cache_get(self, text: str) -> Optional[bytes]:
-        data = self._cache.get(text)
-        if data is not None:
-            self._cache.move_to_end(text)
-        return data
-
-    def _cache_put(self, text: str, data: bytes) -> None:
-        if len(data) > CACHE_MAX_BYTES // 4:
-            return                                                   # un singolo file enorme non si tiene
-        if text in self._cache:
-            self._cache_bytes -= len(self._cache.pop(text))
-        self._cache[text] = data
-        self._cache_bytes += len(data)
-        while len(self._cache) > CACHE_MAX_ITEMS or self._cache_bytes > CACHE_MAX_BYTES:
-            _, old = self._cache.popitem(last=False)
-            self._cache_bytes -= len(old)
-
-    # ------------------------------------------------------------------ sintesi
-
-    async def synthesize(self, text: str) -> bytes:
-        """MP3 con la voce di Giorgio. Solleva SpeechError per ogni problema."""
-        cached = self._cache_get(text)
-        if cached is not None:
-            return cached                                            # già pagata: niente costo, istantanea
-
-        remaining = self.remaining()
-        if remaining is not None and len(text) > remaining:
-            raise SpeechError("Il limite giornaliero di caratteri del TTS è stato raggiunto: riprova domani.")
-        data = await asyncio.to_thread(self._synthesize_sync, text)
-        self._spent += len(text)
-        self._cache_put(text, data)
-        return data
-
-    def _synthesize_sync(self, text: str) -> bytes:
-        _, botocore = self._import_boto()
-        exceptions = botocore.exceptions
-        client = self._get_client()
+    @staticmethod
+    def _synthesize_sync(text: str, path: str) -> None:
         try:
-            response = client.synthesize_speech(
-                Text=text,
-                TextType="text",              # mai SSML: il testo dell'utente non deve poter inserire markup
-                OutputFormat="mp3",
-                VoiceId=VOICE_ID,
-                LanguageCode=LANGUAGE_CODE,
-                Engine=self.config.engine,
-            )
-            stream = response["AudioStream"]
+            import pyttsx3
+        except ImportError as e:
+            raise SpeechError("La libreria `pyttsx3` non è installata (`pip install pyttsx3`).") from e
+        with LocalEngine._lock:
             try:
-                data = stream.read()
-            finally:
-                stream.close()
-        except (exceptions.NoCredentialsError, exceptions.PartialCredentialsError) as e:
-            raise SpeechError("Mancano le credenziali AWS (vedi README).") from e
-        except exceptions.ClientError as e:
-            raise self._map_client_error(e) from e
-        except (exceptions.ConnectTimeoutError, exceptions.ReadTimeoutError) as e:
-            raise SpeechError("Amazon Polly non ha risposto in tempo.") from e
-        except exceptions.EndpointConnectionError as e:
-            raise SpeechError("Amazon Polly non è raggiungibile (problema di rete?).") from e
-        except exceptions.BotoCoreError as e:
-            log.warning("Errore boto3 verso Polly: %s", type(e).__name__)
-            raise SpeechError("Errore di comunicazione con Amazon Polly.") from e
+                engine = pyttsx3.init()
+                voices = engine.getProperty("voices")
+                voice = next((v for v in voices if VOICE_NAME.lower() in v.name.lower()), None)
+                if voice is None:
+                    log.warning("Voce %s non trovata. Voci disponibili: %s", VOICE_NAME, [v.name for v in voices])
+                    raise SpeechError(f"La voce {VOICE_NAME} non è installata su questo PC.")
+                engine.setProperty("voice", voice.id)
+                engine.setProperty("rate", RATE)
+                engine.setProperty("volume", 1.0)
+                engine.save_to_file(text, path)
+                engine.runAndWait()
+            except SpeechError:
+                raise
+            except Exception as e:
+                log.warning("Errore del motore vocale locale: %s", type(e).__name__)
+                raise SpeechError("Il motore vocale locale ha avuto un errore.") from e
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise SpeechError("Il motore vocale locale non ha prodotto nessun audio.")
 
-        if not data:
-            raise SpeechError("Amazon Polly non ha restituito nessun audio.")
-        return data
-
-    def _map_client_error(self, error) -> SpeechError:
-        info = error.response.get("Error", {})
-        code = info.get("Code", "")
-        status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
-        # Si logga solo il codice: il messaggio di AWS può contenere ARN o dettagli dell'account
-        log.warning("Polly ha risposto con l'errore %s (HTTP %s)", code, status)
-        if code in _AUTH_ERRORS:
-            return SpeechError("Le credenziali AWS non sono valide o non permettono di usare Polly (serve polly:SynthesizeSpeech).")
-        if code in _THROTTLE_ERRORS:
-            return SpeechError("Amazon Polly ha troppe richieste: riprova tra poco.")
-        if code == "EngineNotSupportedException":
-            return SpeechError(
-                f"La voce {VOICE_ID} non supporta il motore `{self.config.engine}` in questa regione: "
-                "imposta POLLY_ENGINE (standard, neural, long-form o generative)."
-            )
-        if code == "LanguageNotSupportedException":
-            return SpeechError(f"La voce {VOICE_ID} non è disponibile in questa regione AWS: prova con un'altra AWS_REGION.")
-        if code == "TextLengthExceededException":
-            return SpeechError("Il testo è troppo lungo per Amazon Polly.")
-        if code in _SERVICE_ERRORS or status >= 500:
-            return SpeechError("Amazon Polly è momentaneamente non disponibile.")
-        return SpeechError("Amazon Polly ha rifiutato la richiesta.")
-
-    async def close(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            try:
-                await asyncio.to_thread(client.close)
-            except Exception:
-                log.debug("Chiusura del client Polly non riuscita", exc_info=True)
 
 
 # --------------------------------------------------------------------------------- stato
@@ -356,12 +167,12 @@ class GuildSpeech:
         return self.worker is not None and not self.worker.done()
 
 
-class PollyTTS(commands.Cog):
-    """Fa parlare il bot con la voce di Giorgio (Amazon Polly), a turno, per chi non può parlare."""
+class LocalTTS(commands.Cog):
+    """Fa parlare il bot con la voce di Giorgio (locale), a turno, per chi non può parlare."""
 
-    def __init__(self, bot: commands.Bot, config: Optional[PollyConfig] = None):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.engine = PollyEngine(config or PollyConfig.from_env())
+        self.engine = LocalEngine()
         self.guilds: dict[int, GuildSpeech] = {}
 
     # ------------------------------------------------------------------ utilità
@@ -380,7 +191,6 @@ class PollyTTS(commands.Cog):
     async def cog_unload(self) -> None:
         for guild_id in list(self.guilds):
             self._drop(guild_id)
-        await self.engine.close()
 
     @staticmethod
     async def _private(item: Utterance, text: str) -> None:
@@ -450,15 +260,13 @@ class PollyTTS(commands.Cog):
         if voice is None or voice.channel is None:
             return await self._private(item, "⚠️ Non sei più in un canale vocale: il messaggio non è stato letto.")
 
-        path = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4()}.mp3")
+        path = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4()}.wav")
         vc = None
         source = None
         try:
-            audio = await self.engine.synthesize(item.text)
+            await self.engine.synthesize(item.text, path)
             if self.guilds.get(guild.id) is not state:
                 return                                   # il bot è stato disconnesso nel frattempo
-            with open(path, "wb") as f:
-                f.write(audio)
 
             vc = await self._connect(guild, voice.channel)
             if vc.is_playing() or vc.is_paused():
@@ -517,12 +325,6 @@ class PollyTTS(commands.Cog):
         text = clean_text(testo, interaction.guild)
         if not is_readable(text):
             return await interaction.response.send_message("❌ Non c'è niente da leggere in questo testo.", ephemeral=True)
-
-        remaining = self.engine.remaining()
-        if remaining is not None and remaining <= 0:
-            return await interaction.response.send_message(
-                "❌ Il limite giornaliero di caratteri del TTS è stato raggiunto: riprova domani.", ephemeral=True
-            )
 
         guild = interaction.guild
         state = self._state(guild.id)
@@ -596,4 +398,4 @@ class PollyTTS(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(PollyTTS(bot))
+    await bot.add_cog(LocalTTS(bot))

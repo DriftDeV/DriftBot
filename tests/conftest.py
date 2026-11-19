@@ -99,3 +99,18 @@ def isolated_data(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(storage, "RVC_MODELS_DIR", base / "models")
     monkeypatch.setattr(legacy_import, "LEGACY_RVC_INDEX", base / "legacy-rvc-index.json")
     yield base
+
+
+@pytest.fixture
+def instant_playback(monkeypatch):
+    """Il voice client finto finisce subito il brano e nessun ffmpeg viene avviato."""
+    import discord
+    import fakes
+
+    def play(self, source, after=None):
+        self.played.append(source)
+        if after:
+            after(None)
+
+    monkeypatch.setattr(fakes.FakeVC, "play", play)
+    monkeypatch.setattr(discord, "FFmpegPCMAudio", lambda audio, **kw: fakes.FakeSource(audio, **kw))

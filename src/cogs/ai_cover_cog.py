@@ -9,6 +9,7 @@ from discord.ext import commands
 import gpu_utils
 import storage
 from cogs.RVC import rvc
+from cogs.playback import with_volume
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +228,7 @@ class AICover(commands.Cog):
                 # Segnala che la riproduzione è finita
                 loop.call_soon_threadsafe(play_done.set)
 
-            vc.play(discord.FFmpegPCMAudio(str(output_path)), after=after_playing)
+            vc.play(with_volume(self.bot, guild.id, discord.FFmpegPCMAudio(str(output_path))), after=after_playing)
 
             embed = discord.Embed(
                 title="🎶Riproduzione in Corso!",
@@ -269,38 +270,15 @@ class AICover(commands.Cog):
             except Exception as e:
                 log.warning("Disconnessione per inattività fallita: %s", e)
 
-    @app_commands.command(name="skip", description="Salta la canzone attualmente in riproduzione")
-    async def skip(self, interaction: discord.Interaction):
-            # Se sta suonando musica (cog Music) salta quella traccia
-            music = self.bot.get_cog("Music")
-            if music is not None and await music.skip_if_active(interaction):
-                return
-
-            vc = interaction.guild.voice_client
-
-            # 1. Controlla se il bot è connesso e sta riproducendo qualcosa
-            if not vc or not vc.is_playing():
-                return await interaction.response.send_message("❌ Non c'è nessuna canzone in riproduzione al momento.", ephemeral=True)
-
-            # 2. Controlla se l'utente è nello stesso canale vocale del bot
-            if not interaction.user.voice or interaction.user.voice.channel.id != vc.channel.id:
-                return await interaction.response.send_message("❌ Devi essere nel mio stesso canale vocale per usare questo comando!", ephemeral=True)
-
-            # 3. Interrompi la riproduzione
-            # Questo attiverà automaticamente la funzione 'after_playing' nel worker
-            vc.stop()
-            if self.queue.empty():
-                embed = discord.Embed(
-                    title="⏭️ Canzone saltata!",
-                    description="Non ci sono altre richieste in coda.",
-                    color=discord.Color.blue()
-                )
-            else:
-                embed = discord.Embed(
-                    title="⏭️ Canzone saltata! Passo alla prossima...",
-                    color=discord.Color.blue()
-                )
-            await interaction.response.send_message(embed=embed)
+    def clear_queue(self, guild_id: int) -> None:
+        """Toglie le richieste in attesa di questo server (per /stop). Quella in corso non si può annullare."""
+        pending = []
+        while not self.queue.empty():
+            pending.append(self.queue.get_nowait())
+            self.queue.task_done()
+        for item in pending:
+            if item["interaction"].guild_id != guild_id:
+                self.queue.put_nowait(item)
 
 
 async def setup(bot: commands.Bot) -> None:

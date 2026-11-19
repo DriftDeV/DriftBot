@@ -89,7 +89,7 @@ async def test_play_message_does_not_let_a_video_title_break_the_formatting(monk
     assert len(message) < 300                                                         # titolo troncato
 
 
-# ---------------------------------------------------------------- /skip dell'AI cover
+# ---------------------------------------------------------------- AI cover
 
 @pytest.fixture
 def cover():
@@ -100,34 +100,6 @@ def cover():
     vc.playing = True
     guild.voice_client = vc
     return SimpleNamespace(cog=cog, guild=guild, channel=channel, vc=vc)
-
-
-async def test_skip_does_not_promise_a_next_song_when_the_queue_is_empty(cover):
-    it = FakeInteraction(cover.guild, cover.channel)
-    await cover.cog.skip.callback(cover.cog, it)
-    embed = it.last
-    assert embed.title == "⏭️ Canzone saltata!" and "Non ci sono altre richieste" in embed.description
-    assert not cover.vc.playing                                          # la canzone è stata davvero fermata
-
-
-async def test_skip_with_more_requests_waiting_announces_the_next_one(cover):
-    cover.cog.queue.put_nowait({"interaction": None})
-    it = FakeInteraction(cover.guild, cover.channel)
-    await cover.cog.skip.callback(cover.cog, it)
-    assert "Passo alla prossima" in it.last.title and it.last.description is None
-
-
-async def test_skip_errors_are_private(cover):
-    cover.vc.playing = False
-    it = FakeInteraction(cover.guild, cover.channel)
-    await cover.cog.skip.callback(cover.cog, it)
-    assert "nessuna canzone" in it.last and it.sent[-1][1]["ephemeral"] is True
-
-    cover.vc.playing = True
-    outsider = FakeInteraction(cover.guild, make_channel(cover.guild, "altro"))
-    await cover.cog.skip.callback(cover.cog, outsider)
-    assert "stesso canale" in outsider.last and outsider.sent[-1][1]["ephemeral"] is True
-    assert cover.vc.playing
 
 
 async def test_ai_cover_notification_in_the_channel_mentions_the_requester(cover):

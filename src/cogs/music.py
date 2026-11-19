@@ -4,9 +4,8 @@ Music cog — riproduzione di musica da URL o ricerca testuale (YouTube & co.).
 Porting in Python del vecchio DiscordMusicBot (Java / JDA / LavaPlayer):
 l'audio viene risolto con yt-dlp e riprodotto in streaming con FFmpeg.
 
-Comandi slash: /play, /pause, /resume, /stop, /setvolume.
-Il comando /skip è definito in ai_cover_cog.py, che delega a questo cog
-tramite `Music.skip_if_active()` quando c'è musica in riproduzione.
+Comando slash: /play. I controlli (/skip, /pause, /resume, /stop, /setvolume) sono globali
+e stanno in playback.py: valgono anche per AI cover e ACE-Step.
 """
 
 import asyncio
@@ -23,10 +22,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import escape_md
+from cogs.playback import with_volume
 
 log = logging.getLogger(__name__)
 
-MAX_VOLUME = 100          # come nella versione Java
 IDLE_TIMEOUT = 120        # secondi di inattività prima di lasciare la vocale
 STREAM_URL_TTL = 600      # gli URL di streaming scadono: li risolviamo di nuovo se più vecchi
 
@@ -114,7 +113,6 @@ class GuildPlayer:
     def __init__(self) -> None:
         self.queue: deque[Track] = deque()
         self.current: Optional[Track] = None
-        self.volume: int = MAX_VOLUME
         self.source: Optional[discord.PCMVolumeTransformer] = None
         self.lock = asyncio.Lock()
         self.idle_task: Optional[asyncio.Task] = None
@@ -168,22 +166,6 @@ class Music(commands.Cog):
             if vc and vc.is_connected() and not vc.is_playing():
                 await vc.disconnect()
 
-    async def _active_vc(self, interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
-        """Restituisce il voice client se c'è musica attiva e l'utente è nel canale giusto."""
-        vc = interaction.guild.voice_client
-        if vc is None or interaction.guild.id not in self.players:
-            await interaction.response.send_message(
-                "❌ Non sto riproducendo musica.", ephemeral=True
-            )
-            return None
-        user_voice = interaction.user.voice
-        if user_voice is None or user_voice.channel != vc.channel:
-            await interaction.response.send_message(
-                "❌ Devi essere nel mio stesso canale vocale!", ephemeral=True
-            )
-            return None
-        return vc
-
     # --------------------------------------------------------------- riproduzione
 
     def _after(self, guild: discord.Guild, error: Optional[Exception]) -> None:
@@ -211,9 +193,8 @@ class Music(commands.Cog):
                     if track.is_stale():
                         fresh = await asyncio.to_thread(extract_track, track.webpage_url)
                         track.stream_url, track.headers, track.resolved_at = fresh.stream_url, fresh.headers, fresh.resolved_at
-                    source = discord.PCMVolumeTransformer(
-                        discord.FFmpegPCMAudio(track.stream_url, **ffmpeg_opts(track)),
-                        volume=player.volume / 100,
+                    source = with_volume(
+                        self.bot, guild.id, discord.FFmpegPCMAudio(track.stream_url, **ffmpeg_opts(track))
                     )
                     vc.play(source, after=lambda err, g=guild: self._after(g, err))
                 except Exception:
@@ -289,88 +270,17 @@ class Music(commands.Cog):
                 f"**{fmt(track.title)}** di **{fmt(track.author)}**"
             )
 
-    @app_commands.command(name="pause", description="Mette in pausa la traccia")
-    @app_commands.guild_only()
-    async def pause(self, interaction: discord.Interaction) -> None:
-        vc = await self._active_vc(interaction)
-        if vc is None:
-            return
-        if vc.is_playing():
-            vc.pause()
-            await interaction.response.send_message("⏸️ Traccia in pausa")
-        else:
-            await interaction.response.send_message(
-                "❌ Nessuna traccia in riproduzione.", ephemeral=True
-            )
+    def upcoming(self, guild: discord.Guild) -> Optional[str]:
+        """Titolo formattato della prossima traccia in coda, se è questo cog a suonare (per /skip)."""
+        player = self.players.get(guild.id)
+        if player is None or not player.queue or not self._music_active(guild.voice_client, player):
+            return None
+        track = player.queue[0]
+        return f"**{fmt(track.title)}** di **{fmt(track.author)}**"
 
-    @app_commands.command(name="resume", description="Riprende la riproduzione")
-    @app_commands.guild_only()
-    async def resume(self, interaction: discord.Interaction) -> None:
-        vc = await self._active_vc(interaction)
-        if vc is None:
-            return
-        if vc.is_paused():
-            vc.resume()
-            await interaction.response.send_message("▶️ Traccia in riproduzione")
-        else:
-            await interaction.response.send_message(
-                "❌ La traccia non è in pausa.", ephemeral=True
-            )
-
-    @app_commands.command(name="stop", description="Ferma la riproduzione e svuota la coda")
-    @app_commands.guild_only()
-    async def stop(self, interaction: discord.Interaction) -> None:
-        vc = await self._active_vc(interaction)
-        if vc is None:
-            return
-        self._drop_player(interaction.guild.id)  # prima, così la callback `after` non riparte
-        vc.stop()
-        await vc.disconnect()
-        await interaction.response.send_message("⏹️ Traccia stoppata")
-
-    @app_commands.command(name="setvolume", description="Imposta il volume del bot")
-    @app_commands.describe(volume=f"Il valore del volume (0-{MAX_VOLUME})")
-    @app_commands.guild_only()
-    async def setvolume(
-        self,
-        interaction: discord.Interaction,
-        volume: app_commands.Range[int, 0, MAX_VOLUME],
-    ) -> None:
-        vc = await self._active_vc(interaction)
-        if vc is None:
-            return
-        player = self.players[interaction.guild.id]
-        player.volume = volume
-        if player.source is not None:
-            player.source.volume = volume / 100
-        await interaction.response.send_message(f"🔊 Volume impostato al valore: {volume}")
-
-    async def skip_if_active(self, interaction: discord.Interaction) -> bool:
-        """
-        Usato da /skip (ai_cover_cog.py). Se c'è musica in riproduzione salta la traccia,
-        risponde all'interazione e restituisce True; altrimenti restituisce False
-        senza toccare l'interazione.
-        """
-        player = self.players.get(interaction.guild.id)
-        if player is None or not self._music_active(interaction.guild.voice_client, player):
-            return False
-
-        vc = await self._active_vc(interaction)
-        if vc is None:
-            return True  # risposta di errore già inviata
-
-        if not player.queue:
-            await interaction.response.send_message(
-                "Non ci sono altre canzoni in coda.", ephemeral=True
-            )
-            return True
-
-        upcoming = player.queue[0]
-        vc.stop()  # la callback `after` avvia la prossima traccia
-        await interaction.response.send_message(
-            f"⏭️ Ora in riproduzione: **{fmt(upcoming.title)}** di **{fmt(upcoming.author)}**"
-        )
-        return True
+    def clear(self, guild_id: int) -> None:
+        """Svuota coda e stato del server (per /stop)."""
+        self._drop_player(guild_id)
 
     # ------------------------------------------------------------------ eventi
 

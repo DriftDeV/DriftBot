@@ -1,28 +1,20 @@
 """
-TTS con la voce Giorgio di Amazon Polly (/tts): comando, coda, limiti, interruzione e motore.
+TTS con la voce Giorgio locale (/tts): comando, coda, limiti, interruzione e motore.
 
-I test del cog usano un motore finto. Quelli del motore usano il VERO boto3 contro un finto server Polly
-(stesso formato REST/JSON e firma AWS SigV4), così si verificano richiesta, firma ed errori come li vedrebbe AWS.
+I test del cog usano un motore finto. Quelli del motore usano un finto modulo `pyttsx3`.
 """
 
 import asyncio
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import discord
 import pytest
-from aiohttp.test_utils import TestServer
 
-from cogs import polly_tts as pt
-from cogs.polly_tts import PollyConfig, PollyEngine, PollyTTS, SpeechError, clean_text
-from fake_servers import FakePolly
+from cogs import local_tts as pt
+from cogs.local_tts import LocalEngine, LocalTTS, SpeechError, clean_text
 from fakes import FakeGuild, FakeInteraction, FakeSource, make_channel
-
-ACCESS_KEY = "AKIATESTKEY1234567890"
-SECRET_KEY = "segretissima/chiave+di+prova/0123456789abcdef"
 
 
 async def wait_until(predicate, timeout=3.0):
@@ -84,29 +76,22 @@ def test_is_readable(text, readable):
 # ============================================================================ il comando
 
 class FakeEngine:
-    """Motore finto per i test del cog: registra i testi e può fallire o avere un tetto di spesa."""
+    """Motore finto per i test del cog: registra i testi e può fallire."""
 
     def __init__(self):
         self.texts = []
         self.problem_text = None
-        self.remaining_value = None
         self.modes = []                  # "fail" per far fallire la prossima sintesi
-        self.closed = False
 
     async def problem(self):
         return self.problem_text
 
-    def remaining(self):
-        return self.remaining_value
-
-    async def synthesize(self, text):
+    async def synthesize(self, text, path):
         self.texts.append(text)
         if self.modes and self.modes.pop(0) == "fail":
             raise SpeechError("errore finto")
-        return b"MP3DATA"
-
-    async def close(self):
-        self.closed = True
+        with open(path, "wb") as f:
+            f.write(b"WAVDATA")
 
 
 @pytest.fixture
@@ -114,7 +99,7 @@ async def tts(monkeypatch):
     monkeypatch.setattr(discord, "FFmpegPCMAudio", FakeSource)
     guild = FakeGuild(7)
     channel = make_channel(guild)
-    cog = PollyTTS(SimpleNamespace(user=SimpleNamespace(id=999)), PollyConfig())
+    cog = LocalTTS(SimpleNamespace(user=SimpleNamespace(id=999)))
     cog.engine = FakeEngine()
     yield SimpleNamespace(cog=cog, guild=guild, channel=channel, engine=cog.engine)
     await cog.cog_unload()
@@ -150,12 +135,12 @@ async def test_speaks_in_the_users_channel_and_shows_the_text(tts):
     assert it.sent[0][1]["allowed_mentions"].everyone is False and it.sent[0][1]["allowed_mentions"].users is False
 
     await wait_until(lambda: vc_of(tts) is not None and vc_of(tts).playing)
-    mp3 = Path(vc_of(tts).played[0].url)
-    assert mp3.suffix == ".mp3" and mp3.read_bytes() == b"MP3DATA"      # il file esiste mentre suona...
+    wav = Path(vc_of(tts).played[0].url)
+    assert wav.suffix == ".wav" and wav.read_bytes() == b"WAVDATA"      # il file esiste mentre suona...
     assert tts.engine.texts == ["ciao a tutti"]
 
     end_playback(tts)
-    await wait_until(lambda: not mp3.exists())                           # ...e viene eliminato a fine riproduzione
+    await wait_until(lambda: not wav.exists())                           # ...e viene eliminato a fine riproduzione
     state = tts.cog.guilds[7]
     await wait_until(lambda: not state.active and state.idle_task is not None)   # poi parte il timer di inattività
 
@@ -210,18 +195,10 @@ async def test_errors_are_private_and_nothing_is_said_publicly(tts):
 
 
 async def test_missing_configuration_is_explained_privately_and_nothing_breaks(tts):
-    tts.engine.problem_text = "Mancano le credenziali AWS: imposta AWS_ACCESS_KEY_ID."
+    tts.engine.problem_text = "La libreria `pyttsx3` non è installata."
     it = await say(tts, "ciao")
-    assert "non è configurato" in it.last and "AWS_ACCESS_KEY_ID" in it.last
+    assert "non è configurato" in it.last and "pyttsx3" in it.last
     assert it.sent[0][1]["ephemeral"] is True and vc_of(tts) is None and tts.engine.texts == []
-
-
-async def test_daily_budget_exhausted_is_reported_privately(tts):
-    tts.engine.remaining_value = 0
-    it = await say(tts, "ciao")
-    assert "limite giornaliero" in it.last and it.sent[0][1]["ephemeral"] is True and tts.engine.texts == []
-    tts.engine.remaining_value = 100                             # con margine il comando funziona
-    assert "limite" not in (await say(tts, "ciao")).sent[0][0]
 
 
 async def test_does_not_interrupt_other_audio_or_speak_in_two_channels(tts):
@@ -336,259 +313,80 @@ async def test_bot_disconnection_clears_everything(tts):
     await wait_until(lambda: state.worker is None or state.worker.done())
 
 
-async def test_unloading_the_cog_closes_the_engine(tts):
-    await tts.cog.cog_unload()
-    assert tts.engine.closed
-
-
 def test_command_has_a_per_user_cooldown_and_a_single_option():
-    command = PollyTTS(SimpleNamespace(), PollyConfig()).tts
+    command = LocalTTS(SimpleNamespace()).tts
     assert len(command.checks) == 1                                # il cooldown: l'errore lo gestisce main.py
     params = {p.name: p for p in command.parameters}
     assert list(params) == ["testo"] and params["testo"].required and params["testo"].max_value == pt.MAX_CHARS
 
 
-# ======================================================== motore: boto3 vero + Polly finto
+# ================================================================ motore: finto pyttsx3
 
-@pytest.fixture(autouse=True)
-def aws_env(monkeypatch, tmp_path):
-    """Credenziali di prova e nessun accesso ai file/metadati AWS reali."""
-    for var in ("AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION", "POLLY_ENGINE", "TTS_DAILY_CHARS"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", ACCESS_KEY)
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "nessun-file"))
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "nessun-file"))
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+class FakePyttsx3:
+    """Finto modulo pyttsx3: registra proprietà e testo, scrive un WAV finto."""
+
+    def __init__(self, voices, audio=b"RIFFfake"):
+        self.voices = [SimpleNamespace(name=n, id=f"id-{n}") for n in voices]
+        self.audio = audio
+        self.props = {}
+        self.said = []
+
+    def init(self):
+        return self
+
+    def getProperty(self, name):
+        return self.voices
+
+    def setProperty(self, name, value):
+        self.props[name] = value
+
+    def save_to_file(self, text, path):
+        self.said.append(text)
+        self._path = path
+
+    def runAndWait(self):
+        with open(self._path, "wb") as f:
+            f.write(self.audio)
 
 
 @pytest.fixture
-async def polly():
-    pytest.importorskip("boto3")
-    fake = FakePolly()
-    server = TestServer(fake.app())
-    await server.start_server()
-    fake.url = str(server.make_url("")).rstrip("/")
-    engines = []
-
-    def make(**overrides):
-        options = dict(endpoint_url=fake.url, region="eu-central-1", timeout=3, max_attempts=1, daily_chars=0)
-        engine = PollyEngine(PollyConfig(**{**options, **overrides}))
-        engines.append(engine)
-        return engine
-
-    fake.make = make
-    yield fake
-    for engine in engines:
-        await engine.close()
-    await server.close()
+def pyttsx3(monkeypatch):
+    fake = FakePyttsx3(["Elsa", "Microsoft Giorgio Desktop"])
+    monkeypatch.setitem(sys.modules, "pyttsx3", fake)
+    return fake
 
 
-async def test_request_follows_the_polly_contract_and_is_signed(polly):
-    audio = await polly.make().synthesize("ciao a tutti")
-    assert audio == polly.audio
-
-    request = polly.requests[0]
-    assert request["body"] == {
-        "Text": "ciao a tutti", "TextType": "text", "OutputFormat": "mp3",
-        "VoiceId": "Giorgio", "LanguageCode": "it-IT", "Engine": "standard",
-    }
-    auth = request["headers"]["authorization"]
-    assert auth.startswith(f"AWS4-HMAC-SHA256 Credential={ACCESS_KEY}/") and "/eu-central-1/polly/aws4_request" in auth
-    # la chiave segreta non viaggia mai: solo la firma
-    assert all(SECRET_KEY not in str(v) for v in request["headers"].values()) and SECRET_KEY not in str(request["body"])
+async def test_picks_the_giorgio_voice_and_writes_the_audio(pyttsx3, tmp_path):
+    path = tmp_path / "out.wav"
+    await LocalEngine().synthesize("ciao", str(path))
+    assert path.read_bytes() == b"RIFFfake" and pyttsx3.said == ["ciao"]
+    assert pyttsx3.props == {"voice": "id-Microsoft Giorgio Desktop", "rate": pt.RATE, "volume": 1.0}
 
 
-async def test_engine_and_region_come_from_the_config(polly):
-    await polly.make(engine="neural", region="eu-west-1").synthesize("ciao")
-    request = polly.requests[0]
-    assert request["body"]["Engine"] == "neural" and "/eu-west-1/polly/" in request["headers"]["authorization"]
+async def test_missing_voice_is_explained_and_lists_the_installed_ones(pyttsx3, tmp_path, caplog):
+    pyttsx3.voices = pyttsx3.voices[:1]
+    with pytest.raises(SpeechError, match="Giorgio"):
+        await LocalEngine().synthesize("ciao", str(tmp_path / "out.wav"))
+    assert "Elsa" in caplog.text
 
 
-async def test_user_text_is_sent_as_plain_text_never_as_ssml(polly):
-    hostile = "<speak>ciao<break time=\"10s\"/></speak> & \"virgolette\" 'apici' <voice name=\"x\">"
-    await polly.make().synthesize(hostile)
-    body = polly.requests[0]["body"]
-    assert body["Text"] == hostile and body["TextType"] == "text"        # Polly lo legge come testo: nessun markup
-
-
-async def test_repeated_phrases_come_from_the_cache_for_free(polly):
-    engine = polly.make(daily_chars=1000)
-    first = await engine.synthesize("ciao")
-    assert await engine.synthesize("ciao") == first
-    assert len(polly.requests) == 1 and engine.remaining() == 996      # la seconda volta non costa né caratteri né rete
-    await engine.synthesize("altro")
-    assert len(polly.requests) == 2
-
-
-async def test_cache_is_bounded(polly, monkeypatch):
-    monkeypatch.setattr(pt, "CACHE_MAX_ITEMS", 2)
-    engine = polly.make()
-    for text in ("uno", "due", "tre"):
-        await engine.synthesize(text)
-    assert list(engine._cache) == ["due", "tre"]                        # il più vecchio è stato eliminato
-    await engine.synthesize("due")                                       # ancora in cache
-    assert len(polly.requests) == 3
-
-    monkeypatch.setattr(pt, "CACHE_MAX_ITEMS", 64)
-    monkeypatch.setattr(pt, "CACHE_MAX_BYTES", 8000)
-    big = polly.make()
-    polly.audio = b"x" * 3000                                           # > un quarto del limite: non si tiene
-    await big.synthesize("grande")
-    assert "grande" not in big._cache and big._cache_bytes == 0
-
-
-async def test_daily_character_budget(polly):
-    engine = polly.make(daily_chars=10)
-    assert engine.remaining() == 10
-    await engine.synthesize("ciao ciao")                                 # 9 caratteri
-    assert engine.remaining() == 1
-    with pytest.raises(SpeechError, match="limite giornaliero"):
-        await engine.synthesize("troppo lungo")
-    assert len(polly.requests) == 1                                      # il rifiuto non chiama (né paga) Polly
-    assert await engine.synthesize("ciao ciao") == polly.audio          # ma ciò che è in cache si può sempre ripetere
-
-    engine._day = "2000-01-01"                                           # nuovo giorno (UTC): il contatore riparte
-    assert engine.remaining() == 10
-
-    assert polly.make(daily_chars=0).remaining() is None                 # 0 = nessun tetto
-
-
-@pytest.mark.parametrize("status, code, expected", [
-    (403, "UnrecognizedClientException", "credenziali AWS non sono valide"),
-    (403, "AccessDeniedException", "polly:SynthesizeSpeech"),
-    (400, "ExpiredTokenException", "credenziali AWS non sono valide"),
-    (400, "ThrottlingException", "troppe richieste"),
-    (400, "EngineNotSupportedException", "POLLY_ENGINE"),
-    (400, "LanguageNotSupportedException", "AWS_REGION"),
-    (400, "TextLengthExceededException", "troppo lungo"),
-    (500, "ServiceFailureException", "non disponibile"),
-    (503, "ServiceUnavailable", "non disponibile"),
-    (400, "UnCodiceNuovoDiAws", "rifiutato"),
-])
-async def test_polly_errors_are_mapped_without_leaking_details(polly, caplog, status, code, expected):
-    polly.error = (status, code, "dettagli interni arn:aws:iam::123456789012:user/segreto")
-    with caplog.at_level("DEBUG"):
-        with pytest.raises(SpeechError) as error:
-            await polly.make().synthesize("ciao")
-    message = str(error.value)
-    assert expected in message
-    assert "arn:aws" not in message and "123456789012" not in message and SECRET_KEY not in message
-    # Nei log del bot compare solo il codice dell'errore. (A livello DEBUG è botocore stesso a stampare il corpo
-    # della risposta, ma il bot logga a INFO: qui si controlla ciò che scrive il NOSTRO codice.)
-    ours = " ".join(r.getMessage() for r in caplog.records if r.name == "cogs.polly_tts")
-    assert code in ours and "arn:aws" not in ours and "123456789012" not in ours and SECRET_KEY not in ours
-
-
-async def test_slow_unreachable_and_empty_responses(polly):
-    polly.delay = 1.0
-    with pytest.raises(SpeechError, match="in tempo"):
-        await polly.make(timeout=0.3).synthesize("ciao")
-
-    with pytest.raises(SpeechError, match="non è raggiungibile"):
-        await PollyEngine(PollyConfig(endpoint_url="http://127.0.0.1:1", max_attempts=1, timeout=2)).synthesize("ciao")
-
-    polly.delay, polly.empty = 0, True
+async def test_empty_audio_is_an_error(pyttsx3, tmp_path):
+    pyttsx3.audio = b""
     with pytest.raises(SpeechError, match="nessun audio"):
-        await polly.make().synthesize("ciao")
+        await LocalEngine().synthesize("ciao", str(tmp_path / "out.wav"))
 
 
-async def test_failed_synthesis_is_not_cached_or_charged(polly):
-    engine = polly.make(daily_chars=100)
-    polly.error = (500, "ServiceFailureException", "x")
-    with pytest.raises(SpeechError):
-        await engine.synthesize("ciao")
-    assert engine.remaining() == 100 and "ciao" not in engine._cache
-    polly.error = None
-    assert await engine.synthesize("ciao") == polly.audio                # al secondo tentativo funziona
+async def test_engine_crash_does_not_leak_details(pyttsx3, tmp_path):
+    pyttsx3.runAndWait = lambda: 1 / 0
+    with pytest.raises(SpeechError) as e:
+        await LocalEngine().synthesize("ciao", str(tmp_path / "out.wav"))
+    assert "division" not in str(e.value)
 
 
-async def test_missing_credentials_are_explained(polly, monkeypatch):
-    engine = polly.make()
-    assert await engine.problem() is None                                # con le credenziali nel .env va tutto bene
-
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID")
-    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY")
-    no_creds = polly.make()
-    assert "AWS_ACCESS_KEY_ID" in await no_creds.problem()
-    with pytest.raises(SpeechError, match="credenziali"):
-        await no_creds.synthesize("ciao")
-    assert polly.requests == []                                          # senza credenziali non parte nessuna richiesta
-
-
-async def test_credential_check_is_cached_including_failures(polly, monkeypatch):
-    """Il controllo può essere lento (file, metadati EC2): /tts deve rispondere entro 3 secondi."""
-    engine = polly.make()
-    calls = []
-    monkeypatch.setattr(engine, "_problem_sync", lambda: calls.append(1) or "manca qualcosa")
-    assert await engine.problem() == "manca qualcosa" and await engine.problem() == "manca qualcosa"
-    assert len(calls) == 1
-    monkeypatch.setattr(pt, "CONFIG_CHECK_TTL", -1)                     # scaduto: si ricontrolla
-    await engine.problem()
-    assert len(calls) == 2
-
-
-async def test_without_boto3_the_bot_still_starts_and_explains(monkeypatch):
-    monkeypatch.setitem(sys.modules, "boto3", None)                      # import boto3 -> ImportError
-    engine = PollyEngine(PollyConfig())
-    assert "pip install boto3" in await engine.problem()
-    with pytest.raises(SpeechError, match="pip install boto3"):
-        await engine.synthesize("ciao")
-
-
-async def test_closing_the_engine_is_safe_and_repeatable(polly):
-    engine = polly.make()
-    await engine.synthesize("ciao")
-    await engine.close()
-    await engine.close()
-    assert await engine.synthesize("altro")                              # si riapre da solo
-
-
-def test_config_from_env(monkeypatch):
-    default = PollyConfig.from_env()
-    assert (default.region, default.engine, default.daily_chars) == ("eu-central-1", "standard", 50000)
-
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
-    assert PollyConfig.from_env().region == "eu-west-1"
-    monkeypatch.setenv("AWS_REGION", "eu-south-2")                       # AWS_REGION ha la precedenza
-    monkeypatch.setenv("POLLY_ENGINE", " Neural ")
-    monkeypatch.setenv("TTS_DAILY_CHARS", "1234")
-    config = PollyConfig.from_env()
-    assert (config.region, config.engine, config.daily_chars) == ("eu-south-2", "neural", 1234)
-
-    monkeypatch.setenv("POLLY_ENGINE", "magico")                         # non valido: si torna al predefinito
-    monkeypatch.setenv("TTS_DAILY_CHARS", "tanti")
-    config = PollyConfig.from_env()
-    assert (config.engine, config.daily_chars) == ("standard", 50000)
-    monkeypatch.setenv("TTS_DAILY_CHARS", "-5")
-    assert PollyConfig.from_env().daily_chars == 0                       # negativo = nessun tetto
-
-
-# ============================================================ catena completa con audio vero
-
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg non installato")
-async def test_the_audio_from_polly_is_playable_by_discord_ffmpeg(polly, tmp_path):
-    """Dalla risposta di Polly al file temporaneo letto da FFmpegPCMAudio, esattamente come fa il bot."""
-    mp3 = tmp_path / "prova.mp3"
-    made = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-         "-codec:a", "libmp3lame", str(mp3)], capture_output=True,
-    )
-    if made.returncode != 0 or not mp3.exists():
-        pytest.skip("ffmpeg senza libmp3lame")
-    polly.audio = mp3.read_bytes()
-
-    audio = await polly.make().synthesize("prova di riproduzione")
-    path = tmp_path / "tts.mp3"
-    path.write_bytes(audio)
-    source = discord.FFmpegPCMAudio(str(path))
-    try:
-        frames = []
-        while True:
-            frame = source.read()                                         # 20ms di PCM a 48kHz stereo
-            if not frame:
-                break
-            frames.append(frame)
-    finally:
-        source.cleanup()
-    assert len(frames) > 20 and all(len(f) == 3840 for f in frames[:-1]) and any(any(f) for f in frames)
+async def test_without_pyttsx3_the_bot_still_starts_and_explains(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "pyttsx3", None)          # import -> ImportError
+    monkeypatch.setattr(pt.importlib.util, "find_spec", lambda name: None)
+    engine = LocalEngine()
+    assert "pip install pyttsx3" in await engine.problem()
+    with pytest.raises(SpeechError, match="pyttsx3"):
+        await engine.synthesize("ciao", str(tmp_path / "out.wav"))
