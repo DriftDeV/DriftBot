@@ -50,11 +50,12 @@ RUN python scripts/install_deps.py
 # ---------------------------------------------------------------- 2. runtime: solo ciò che serve per girare
 FROM docker.io/library/python:3.10-slim-bookworm
 
-# ffmpeg: tutto l'audio; libopus0: voce di Discord; libsndfile1: soundfile;
+# ffmpeg: tutto l'audio; libopus0: voce di Discord; libsndfile1: soundfile; libatomic1: serve a una libreria di
+# /ai-cover (senza, il cog non si carica: l'ha trovato scripts/smoke_cogs.py nel workflow);
 # espeak-ng: /tts (pyttsx3 su Linux). Node serve a yt-dlp per le sfide JavaScript di YouTube:
 # lo si copia da un'immagine Node perché quello di Debian bookworm (v18) è troppo vecchio per yt-dlp.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libopus0 libsndfile1 espeak-ng libespeak-ng1 ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg libopus0 libsndfile1 libatomic1 espeak-ng libespeak-ng1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=docker.io/library/node:22-slim /usr/local/bin/node /usr/local/bin/node
 

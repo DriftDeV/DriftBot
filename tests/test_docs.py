@@ -219,3 +219,41 @@ def test_the_readme_explains_the_docker_setup_with_files_that_exist():
     for name in ("Dockerfile", "docker-compose.yml", ".dockerignore"):
         assert (ROOT / name).is_file()
     assert "TORCH_INDEX" in README and "docker-compose.yml" in README
+
+
+# ------------------------------------------------------------------------------- workflow di installazione
+
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "install-and-container.yml"
+WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+
+def test_install_workflow_only_uses_make_targets_scripts_and_files_that_exist():
+    targets = set(re.findall(r"^([a-z][\w-]*):", MAKEFILE, flags=re.MULTILINE))
+    used = set(re.findall(r"\bmake ([a-z][\w-]*)", WORKFLOW)) | set(re.findall(r"^\s+target: ([a-z][\w-]*)", WORKFLOW, flags=re.MULTILINE))
+    assert {"install", "install-dev", "test", "test-py"} <= used
+    assert not used - targets, f"il workflow usa target make inesistenti: {used - targets}"
+    for script in set(re.findall(r"scripts/[\w.]+\.py", WORKFLOW)):
+        assert (ROOT / script).is_file(), f"il workflow usa {script}, che non esiste"
+    assert (ROOT / "docker-compose.yml").is_file() and "docker compose" in WORKFLOW
+
+
+def test_install_workflow_tests_the_python_version_the_makefile_uses():
+    assert re.search(r'^PYTHON := python(3\.\d+)$', MAKEFILE, flags=re.MULTILINE).group(1) == "3.10"
+    assert 'python-version: "3.10"' in WORKFLOW
+
+
+def test_install_workflow_reruns_when_what_it_tests_changes_and_runs_weekly():
+    for path in ("Makefile", "pyproject.toml", "scripts/**", "src/**", "Dockerfile", "docker-compose.yml", ".dockerignore"):
+        assert WORKFLOW.count(f"      - {path}\n") == 2, f"{path} deve far partire il workflow sia su push sia su pull request"
+    assert "schedule:" in WORKFLOW and "workflow_dispatch:" in WORKFLOW
+    # niente àncore YAML (&nome / *nome): non tutti gli strumenti le leggono nei workflow
+    assert not re.search(r"^\s*[\w-]+:\s+[&*]\w+", WORKFLOW, flags=re.MULTILINE)
+
+
+def test_install_workflow_structure():
+    yaml = pytest.importorskip("yaml")
+    jobs = yaml.safe_load(WORKFLOW)["jobs"]
+    assert set(jobs) == {"install", "container"}
+    assert {entry["target"] for entry in jobs["install"]["strategy"]["matrix"]["include"]} == {"install", "install-dev"}
+    for job in jobs.values():
+        assert job["timeout-minutes"] <= 60

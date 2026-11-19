@@ -146,7 +146,7 @@ install-deps-linux:
 	@if command -v apt-get >/dev/null 2>&1; then \
 		echo "📦 Rilevato Debian/Ubuntu/Mint"; \
 		sudo apt-get update; \
-		sudo apt-get install -y python3.11 python3.11-venv python3-pip ffmpeg; \
+		sudo apt-get install -y python3.10 python3.10-venv python3-pip ffmpeg; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		echo "📦 Rilevato Fedora/RHEL/CentOS"; \
 		sudo dnf install -y python3.10 python3-pip ffmpeg; \
@@ -182,9 +182,9 @@ endif
 endif
 
 install:
-	@# Verifica se python3.11 esiste, altrimenti installa le dipendenze
-	@if ! command -v python3.11 >/dev/null 2>&1; then \
-		echo "⚠️  Python 3.11 non trovato. Avvio installazione dipendenze di sistema..."; \
+	@# Verifica che esista l'interprete che crea il venv ($(PYTHON)), altrimenti installa le dipendenze di sistema
+	@if ! command -v $(PYTHON) >/dev/null 2>&1; then \
+		echo "⚠️  $(PYTHON) non trovato. Avvio installazione dipendenze di sistema..."; \
 		$(MAKE) install-deps; \
 	fi
 ifeq ($(VENV_ACTIVE),1)
@@ -212,9 +212,9 @@ install-project:
 	$(PIP) install -e . --no-deps
 
 install-dev:
-	@# Verifica se python3.11 esiste, altrimenti installa le dipendenze
-	@if ! command -v python3.11 >/dev/null 2>&1; then \
-		echo "⚠️  Python 3.11 non trovato. Avvio installazione dipendenze di sistema..."; \
+	@# Verifica che esista l'interprete che crea il venv ($(PYTHON)), altrimenti installa le dipendenze di sistema
+	@if ! command -v $(PYTHON) >/dev/null 2>&1; then \
+		echo "⚠️  $(PYTHON) non trovato. Avvio installazione dipendenze di sistema..."; \
 		$(MAKE) install-deps; \
 	fi
 ifeq ($(VENV_ACTIVE),1)

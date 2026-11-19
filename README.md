@@ -361,4 +361,11 @@ nessun file orfano.
 - `scripts/install_deps.py`: installa le dipendenze di `pyproject.toml` con yt-dlp per ultimo (lo usano `make install`, `make install-dev`, `make update` e il `Dockerfile`); accetta `--extra dev` e passa a pip le altre opzioni.
 - Docker: `docker build -t driftbot .` costruisce l'immagine; il `Dockerfile` segue lo stesso ordine di installazione del
   `Makefile` (pip 24.0, PyTorch dall'indice scelto, poi le dipendenze). CI: `.github/workflows/tests.yml`.
+- `scripts/smoke_cogs.py`: carica tutti i cog con le librerie vere e controlla che i comandi slash ci siano; non si collega a Discord.
+- **CI** (`.github/workflows/`): `tests.yml` esegue lint e test a ogni push, senza GPU e con moduli finti al posto di PyTorch & co.
+  `install-and-container.yml` prova il flusso vero: `make install` e `make install-dev` su un venv nuovo (Python 3.10, PyTorch CPU) con
+  verifica delle librerie, dei cog e dell'avvio senza token, poi costruisce l'immagine Docker e la esegue (utente, librerie,
+  cog, dashboard con volume, arresto pulito, `docker-compose.yml`). Gira su `main`, sulle pull request che toccano installazione, codice
+  o container, ogni lunedì (per accorgersi quando una dipendenza si rompe) e a mano da *Actions → Run workflow*. Le build CUDA e
+  ROCm non sono provate (scaricano GB di wheel e servono GPU).
 - Ricerche e note di progetto (coerenza di ACE-Step, confronto dei modelli musicali open): cartella `reports/`.
